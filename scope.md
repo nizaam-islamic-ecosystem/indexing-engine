@@ -850,8 +850,7 @@ The minimum completion verification for every implementation phase is:
 ```bash
 
    set -o pipefail
-
-
+   {
       cargo fmt --all
 
       cargo fmt --all --check &&
@@ -866,7 +865,7 @@ The minimum completion verification for every implementation phase is:
 
       cargo test --workspace --doc
 
-   } 2>&1 | tee cargo-check.log
+     } 2>&1 | tee cargo-check.log
 
 ```
 
