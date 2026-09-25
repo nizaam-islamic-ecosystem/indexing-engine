@@ -2403,7 +2403,7 @@ later operational / hardening phases
 
 #### Status
 
-**In Progress**
+**Completed**
 
 ##### Goal
 
@@ -3822,49 +3822,185 @@ The implementation should preserve room for these decisions.
 
 ---
 
+#### What Was Implemented
+
+Phase 1 has been implemented and verified against the approved Phase 1 scope.
+
+The implementation now provides:
+
+```text
+IndexId
+    → opaque fixed 512-bit / 64-byte Indexing-owned identity
+
+IndexNamespace
+    → validated logical namespace identity with the approved ASCII grammar
+
+NamespaceRegistry
+    → deterministic in-memory logical namespace registration
+
+IndexDefinitionId
+    → validated definition identity kept separate from IndexId
+
+IndexDefinitionIdentity
+    → definition_id + namespace + index family composition
+
+IndexFamily
+    → Identity
+    → Inverted
+    → Relationship
+    → Similarity
+```
+
+The Phase 1 public module boundary is exposed through:
+
+```text
+nizaam_indexing
+├── identity
+│   ├── IndexId
+│   ├── IndexNamespace
+│   ├── NamespaceRegistry
+│   ├── IndexDefinitionId
+│   └── IndexDefinitionIdentity
+└── index
+    └── IndexFamily
+```
+
+Testing was completed at all required levels:
+
+```text
+Level 1
+→ source-local unit tests
+
+Level 2
+→ module-level interaction tests through mod.rs
+
+Level 3
+→ tests/identity.rs
+→ tests/index.rs
+→ tests/conformance.rs
+```
+
+The conformance coverage also protects the boundary between Indexing-owned
+identity/logical-space concepts and Core-owned engine/runtime identity.
+
+No physical storage technology, index construction/query implementation,
+semantic mapping model, provider, embedding algorithm, or other deferred
+Phase 2+ functionality was introduced.
+
+#### Decisions Made for Phase 1
+
+The following Phase 1 decisions were explicitly resolved before implementation
+and are now reflected in the implementation:
+
+1. **IndexId width and representation**
+
+   ```text
+   512 bits
+   64 bytes
+   opaque binary value
+   ```
+
+   The generation/hash algorithm remains deliberately unfrozen.
+
+2. **IndexDefinitionId representation**
+
+   ```text
+   validated String newtype
+   ```
+
+   It remains a distinct identity from `IndexId`, `IndexNamespace`, and Core
+   identity types.
+
+3. **IndexNamespace grammar**
+
+   ```text
+   allowed: a-z, 0-9, '.', '-', '_'
+   non-empty
+   maximum 128 bytes
+   first/last character must be [a-z0-9]
+   no whitespace
+   no control characters
+   no Unicode
+   no consecutive separators
+   no leading/trailing separators
+   ```
+
+4. **NamespaceRegistry model**
+
+   ```text
+   in-memory
+   logical only
+   deterministic registration/lookup/removal
+   no persistence
+   no physical partitioning
+   ```
+
+5. **Index-family semantics**
+
+   The foundational families are limited to:
+
+   ```text
+   Identity
+   Inverted
+   Relationship
+   Similarity
+   ```
+
+   `Relationship` remains a generic indexing family rather than a semantic
+   predicate model, and `Similarity` does not select an embedding model,
+   vector database, or concrete similarity algorithm.
+
+6. **Deferred implementation choices remain deferred**
+
+   Phase 1 does not freeze IndexId generation, human-readable encoding,
+   physical storage, partitioning/sharding, providers, serialization,
+   similarity implementation, or other later architectural choices.
+
+---
+
 #### Completion Criteria
 
 Phase 1 is complete when:
 
 #### Verification Checklist
 
-- [ ] IndexId exists as a genuine Indexing identity type.
+- [x] IndexId exists as a genuine Indexing identity type.
 
-- [ ] Namespace exists as a genuine logical identity type.
+- [x] Namespace exists as a genuine logical identity type.
 
-- [ ] IndexDefinition identity is represented separately from IndexId.
+- [x] IndexDefinition identity is represented separately from IndexId.
 
-- [ ] The four foundational IndexFamily variants exist.
+- [x] The four foundational IndexFamily variants exist.
 
-- [ ] Logical namespaces can be registered and distinguished.
+- [x] Logical namespaces can be registered and distinguished.
 
-- [ ] Duplicate logical namespace registration is handled deterministically.
+- [x] Duplicate logical namespace registration is handled deterministically.
 
-- [ ] One source-owned object identity can participate in multiple logical
+- [x] One source-owned object identity can participate in multiple logical
   index spaces without receiving multiple canonical identities.
 
-- [ ] Namespace is not treated as a physical partition.
+- [x] Namespace is not treated as a physical partition.
 
-- [ ] Relationship indexing does not introduce semantic predicate ownership.
+- [x] Relationship indexing does not introduce semantic predicate ownership.
 
-- [ ] Source categories remain source-owned and are not implemented as
+- [x] Source categories remain source-owned and are not implemented as
   Indexing domain entities.
 
-- [ ] The complete Phase 1 public module boundary is usable.
+- [x] The complete Phase 1 public module boundary is usable.
 
-- [ ] Unit tests cover implementation behavior.
+- [x] Unit tests cover implementation behavior.
 
-- [ ] Integration/conformance tests cover public cross-module behavior.
+- [x] Integration/conformance tests cover public cross-module behavior.
 
-- [ ] Negative boundary tests protect identity and semantic ownership.
+- [x] Negative boundary tests protect identity and semantic ownership.
 
-- [ ] No physical indexing technology has leaked into the logical contract.
+- [x] No physical indexing technology has leaked into the logical contract.
 
-- [ ] No Core runtime mechanism has been reimplemented locally.
+- [x] No Core runtime mechanism has been reimplemented locally.
 
-- [ ] No Phase 2+ indexing functionality has been implemented as a shortcut.
+- [x] No Phase 2+ indexing functionality has been implemented as a shortcut.
 
-- [ ] Previously verified Core behavior remains untouched.
+- [x] Previously verified Core behavior remains untouched.
 
 Completion does **not** mean that the Indexing Engine can yet build or query
 real physical indexes. That begins in later phases.
@@ -3947,7 +4083,7 @@ physical storage, or a particular indexing technology.
 
 #### Status
 
-**Not Started**
+**In Progress**
 
 ##### Goal
 
