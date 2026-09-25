@@ -113,7 +113,7 @@ impl CapabilitySet {
     /// Core remains authoritative for cancellation, deadline, lookup, and
     /// handler invocation ordering.
     #[must_use]
-    pub fn dispatch(
+    pub(crate) fn dispatch(
         &self,
         context: &EngineContext,
         invocation: &CapabilityInvocation,

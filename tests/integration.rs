@@ -73,6 +73,7 @@ fn request_envelope(
 fn prepared_engine() -> (
     IndexingEngine,
     nizaam_core::control_plane::registry::EngineRegistry,
+    CapabilityId,
 ) {
     let engine = test_engine();
     let registry = engine_registry();
@@ -82,7 +83,7 @@ fn prepared_engine() -> (
         .begin_registration()
         .expect("registration lifecycle entry should succeed");
     register_engine(&engine, &registry).expect("engine registration should succeed");
-    engine
+    let capability_id = engine
         .register_phase0_capability()
         .expect("Phase 0 capability registration should succeed");
     engine
@@ -90,18 +91,12 @@ fn prepared_engine() -> (
         .expect("ready transition should succeed");
     engine.serve().expect("serving transition should succeed");
 
-    (engine, registry)
-}
-
-fn registered_capability_id(engine: &IndexingEngine) -> CapabilityId {
-    assert_eq!(engine.capabilities().len(), 1);
-    CapabilityId::new("nizaam.indexing.phase0.probe").expect("Phase 0 capability id must be valid")
+    (engine, registry, capability_id)
 }
 
 #[test]
 fn phase0_public_api_completes_universal_request_to_response_flow() {
-    let (engine, registry) = prepared_engine();
-    let capability_id = registered_capability_id(&engine);
+    let (engine, registry, capability_id) = prepared_engine();
     let operation = operation_context("integration-request-response");
 
     let request: UniversalRequest = universal_request(request_envelope(
@@ -142,8 +137,7 @@ fn phase0_public_api_completes_universal_request_to_response_flow() {
 
 #[test]
 fn universal_request_context_survives_the_public_runtime_boundary() {
-    let (engine, _registry) = prepared_engine();
-    let capability_id = registered_capability_id(&engine);
+    let (engine, _registry, capability_id) = prepared_engine();
     let operation = operation_context("integration-context");
 
     let request = universal_request(request_envelope(
@@ -215,7 +209,7 @@ fn full_request_path_respects_ready_and_draining_admission_boundaries() {
 
 #[test]
 fn capability_resolution_comes_from_the_request_contract_without_local_routing() {
-    let (engine, _registry) = prepared_engine();
+    let (engine, _registry, _capability_id) = prepared_engine();
     let unknown_capability = CapabilityId::new("nizaam.indexing.phase0.unknown")
         .expect("unknown capability id must be valid");
     let request = universal_request(request_envelope(
@@ -234,8 +228,7 @@ fn capability_resolution_comes_from_the_request_contract_without_local_routing()
 
 #[test]
 fn capability_dispatch_remains_core_backed_through_the_public_request_boundary() {
-    let (engine, _registry) = prepared_engine();
-    let capability_id = registered_capability_id(&engine);
+    let (engine, _registry, capability_id) = prepared_engine();
     let request = universal_request(request_envelope(
         &engine,
         operation_context("integration-core-dispatch"),

@@ -375,11 +375,8 @@ impl IndexingEngine {
         let mut participants = Participants::new(
             self.engine_id().clone(),
             request_participants.sender.clone(),
-        );
-
-        if let Some(instance) = request_participants.target_instance.clone() {
-            participants = participants.with_sender_instance(instance);
-        }
+        )
+        .with_sender_instance(self.engine_instance_id().clone());
 
         if let Some(instance) = request_participants.sender_instance.clone() {
             participants = participants.with_target_instance(instance);
