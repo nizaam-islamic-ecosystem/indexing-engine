@@ -352,6 +352,123 @@ fn published_engine_registration_can_be_observed_without_turning_the_registry_in
 }
 
 #[test]
+fn phase1_index_identity_namespace_and_definition_identity_remain_distinct() {
+    use nizaam_indexing::identity::{
+        IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
+    };
+    use nizaam_indexing::index::IndexFamily;
+
+    let index_id = IndexId::from_bytes([0x61; 64]);
+    let namespace = IndexNamespace::new("conformance.identity").expect("namespace must be valid");
+    let definition_id =
+        IndexDefinitionId::new("conformance-index").expect("definition id must be valid");
+
+    let definition = IndexDefinitionIdentity::new(
+        definition_id.clone(),
+        namespace.clone(),
+        IndexFamily::Identity,
+    );
+
+    assert_eq!(index_id.as_bytes(), &[0x61; 64]);
+    assert_eq!(definition.definition_id(), &definition_id);
+    assert_eq!(definition.namespace(), &namespace);
+    assert_eq!(definition.family(), IndexFamily::Identity);
+
+    // These are deliberately separate Phase 1 identity roles. The
+    // conformance test does not introduce a conversion or equality relation
+    // between them.
+    assert_ne!(
+        index_id.as_bytes(),
+        definition.definition_id().as_str().as_bytes()
+    );
+}
+
+#[test]
+fn phase1_namespace_registry_is_logical_and_separate_from_engine_registration() {
+    use nizaam_indexing::identity::{IndexNamespace, NamespaceRegistry};
+
+    let engine = test_engine();
+    let engine_registry = engine_registry();
+    let mut namespace_registry = NamespaceRegistry::new();
+
+    let namespace =
+        IndexNamespace::new("conformance.logical-space").expect("namespace must be valid");
+
+    engine.start().unwrap();
+    engine.begin_registration().unwrap();
+    register_engine(&engine, &engine_registry).unwrap();
+
+    namespace_registry
+        .register(namespace.clone())
+        .expect("namespace registration should succeed");
+
+    assert!(engine_registry.contains(engine.engine_instance_id()));
+    assert!(namespace_registry.contains(&namespace));
+
+    // The two registries represent different concerns: engine discovery
+    // versus logical index namespaces.
+    assert_eq!(namespace_registry.len(), 1);
+    assert!(!namespace_registry.contains(
+        &IndexNamespace::new("conformance.other-space").expect("namespace must be valid")
+    ));
+}
+
+#[test]
+fn phase1_index_family_is_not_a_semantic_mapping_or_physical_implementation() {
+    use nizaam_indexing::identity::IndexNamespace;
+    use nizaam_indexing::index::IndexFamily;
+
+    let namespace =
+        IndexNamespace::new("conformance.relationships").expect("namespace must be valid");
+
+    let relationship = (namespace.clone(), IndexFamily::Relationship);
+    let similarity = (namespace, IndexFamily::Similarity);
+
+    assert_eq!(relationship.1, IndexFamily::Relationship);
+    assert_eq!(similarity.1, IndexFamily::Similarity);
+
+    // Phase 1 exposes only the generic family classification. No semantic
+    // predicate, graph relation, embedding model, vector database, ANN
+    // structure, or physical storage implementation is represented here.
+    assert_eq!(relationship.0.as_str(), "conformance.relationships");
+    assert_eq!(similarity.0.as_str(), "conformance.relationships");
+}
+
+#[test]
+fn phase1_logical_index_space_is_independent_from_core_engine_identity() {
+    use nizaam_indexing::identity::{IndexNamespace, NamespaceRegistry};
+
+    let engine = test_engine();
+    let mut namespace_registry = NamespaceRegistry::new();
+
+    let namespace =
+        IndexNamespace::new("conformance.index-space").expect("namespace must be valid");
+    namespace_registry.register(namespace.clone()).unwrap();
+
+    assert!(namespace_registry.contains(&namespace));
+    assert_eq!(engine.engine_id().as_str(), "nizaam.indexing.test");
+    assert_ne!(namespace.as_str(), engine.engine_id().as_str());
+
+    // A logical namespace is not an EngineId, EngineInstanceId, node, or
+    // physical partition. Core remains the owner of engine/runtime identity.
+}
+
+#[test]
+fn phase1_index_identity_is_not_a_core_object_identity() {
+    use nizaam_indexing::identity::IndexId;
+
+    let index_id = IndexId::from_bytes([0x72; 64]);
+    let operation_id = OperationId::new("nizaam.indexing.conformance.phase1-operation")
+        .expect("operation id must be valid");
+
+    assert_eq!(index_id.as_bytes(), &[0x72; 64]);
+    assert_ne!(index_id.as_bytes(), operation_id.as_str().as_bytes());
+
+    // `IndexId` is the indexing crate's opaque concrete-index identity;
+    // Core operation identity remains an independent contract.
+}
+
+#[test]
 fn core_identity_types_are_used_directly_at_the_registration_boundary() {
     let engine_id =
         EngineId::new("nizaam.indexing.conformance.registration").expect("engine id must be valid");

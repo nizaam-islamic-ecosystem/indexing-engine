@@ -30,3 +30,9 @@ pub use engine::{
     RegistrationResult, RequestHandlingError, RuntimeDispatchResult, UniversalRequestResult,
 };
 pub use error::IndexingResult;
+pub use identity::{
+    INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexDefinitionId, IndexDefinitionIdValidationError,
+    IndexDefinitionIdentity, IndexId, IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry,
+    NamespaceRegistryError, NamespaceValidationError,
+};
+pub use index::IndexFamily;
