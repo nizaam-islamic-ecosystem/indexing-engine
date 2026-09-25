@@ -1,0 +1,217 @@
+    Checking nizaam-indexing v0.1.0 (/home/sharique/desktop/nizaam-islamic-ecosystem/engines/infrastructure/indexing)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.55s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+   Compiling nizaam-indexing v0.1.0 (/home/sharique/desktop/nizaam-islamic-ecosystem/engines/infrastructure/indexing)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.23s
+     Running unittests src/lib.rs (target/debug/deps/nizaam_indexing-c38545a5c72c0389)
+
+running 48 tests
+test engine::capability::tests::cancelled_context_never_reaches_the_handler ... ok
+test engine::capability::tests::custom_handler_receives_the_same_engine_context ... ok
+test engine::capability::tests::duplicate_capability_registration_is_rejected_by_core ... ok
+test engine::capability::tests::expired_context_never_reaches_the_handler ... ok
+test engine::capability::tests::new_starts_with_empty_core_registry ... ok
+test engine::capability::tests::phase0_capability_dispatch_returns_the_opaque_payload ... ok
+test engine::capability::tests::register_phase0_capability_uses_the_indexing_engine_identity ... ok
+test engine::capability::tests::unknown_capability_is_rejected_without_handler_execution ... ok
+test engine::registration::tests::cloning_registration_does_not_change_identity ... ok
+test engine::registration::tests::construction_preserves_logical_engine_and_instance_identity ... ok
+test engine::registration::tests::consumed_core_registration_remains_the_same_registration_value ... ok
+test engine::registration::tests::core_registration_value_preserves_both_identities ... ok
+test engine::registration::tests::display_contains_both_identity_roles ... ok
+test engine::registration::tests::one_instance_cannot_be_reassigned_to_a_different_logical_engine ... ok
+test engine::registration::tests::duplicate_instance_registration_is_rejected_by_core ... ok
+test engine::registration::tests::one_logical_engine_can_have_multiple_concrete_instances ... ok
+test engine::registration::tests::registration_uses_the_core_registry_as_the_authoritative_state ... ok
+test engine::runtime::tests::context_preserves_the_supplied_operation_context ... ok
+test engine::runtime::tests::cancelled_context_is_rejected_by_core_dispatch_before_handler_execution ... ok
+test engine::runtime::tests::construction_delegates_identity_to_the_core_runtime ... ok
+test engine::runtime::tests::draining_rejects_new_dispatch_without_invoking_the_handler ... ok
+test engine::runtime::tests::expired_context_is_rejected_by_core_dispatch_before_handler_execution ... ok
+test engine::runtime::tests::readiness_and_serving_remain_separate ... ok
+test engine::runtime::tests::non_serving_dispatch_is_rejected_before_capability_execution ... ok
+test engine::runtime::tests::serving_dispatch_reaches_core_capability_handler ... ok
+test engine::runtime::tests::shutdown_delegates_to_core_and_reaches_stopped ... ok
+test engine::runtime::tests::runtime_does_not_define_a_second_capability_error_boundary ... ok
+test engine::runtime::tests::start_preserves_the_core_startup_sequence ... ok
+test engine::runtime::tests::stopped_runtime_remains_terminal_and_shutdown_is_idempotent ... ok
+test engine::tests::capability_handler_errors_remain_core_capability_errors_across_the_module_facade ... ok
+test engine::tests::construction_keeps_identity_aligned_across_module_boundaries ... ok
+test engine::tests::core_registration_failure_does_not_turn_the_runtime_into_serving ... ok
+test engine::tests::draining_runtime_rejects_new_work_while_core_registration_remains_present ... ok
+test engine::tests::engine_registration_and_capability_registration_remain_distinct ... ok
+test engine::tests::engine_registration_is_rejected_outside_the_core_registering_state ... ok
+test engine::tests::full_phase0_request_flow_crosses_runtime_and_capability_modules ... ok
+test engine::tests::module_facade_does_not_invent_an_indexing_specific_capability_dispatch_error_type ... ok
+test engine::tests::non_serving_runtime_blocks_capability_execution_at_the_module_boundary ... ok
+test engine::tests::phase0_capability_registration_is_rejected_outside_the_core_registering_state ... ok
+test engine::tests::public_universal_request_boundary_produces_a_universal_response ... ok
+test engine::tests::public_universal_request_respects_core_admission_before_capability_dispatch ... ok
+test engine::tests::ready_requires_successful_engine_registration_and_phase0_capability_registration ... ok
+test engine::tests::runtime_context_reaches_the_capability_handler_unchanged ... ok
+test engine::tests::runtime_start_precedes_engine_registration ... ok
+test engine::tests::shutdown_completes_the_composed_runtime_without_removing_core_registration_metadata ... ok
+test engine::tests::shutdown_keeps_registration_and_capability_state_as_separate_concerns ... ok
+test engine::tests::successful_registration_and_capability_setup_can_reach_ready_then_serving ... ok
+test error::tests::indexing_result_uses_core_error_event ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/build.rs (target/debug/deps/build-2a8b00841a04274f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/capacity.rs (target/debug/deps/capacity-9d84136bf426500c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/configuration.rs (target/debug/deps/configuration-ad6c1a2da34e8c5f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-6a71f613a8e4cb16)
+
+running 13 tests
+test capability_set_exposes_the_real_core_capability_registry ... ok
+test capability_state_is_not_a_global_registry_shared_by_independent_engines ... ok
+test core_identity_types_are_used_directly_at_the_registration_boundary ... ok
+test core_runtime_admission_remains_the_authoritative_request_gate ... ok
+test indexing_engine_keeps_core_engine_and_instance_identity_roles_distinct ... ok
+test engine_registration_and_capability_registration_are_separate_core_boundaries ... ok
+test engine_registration_requires_an_external_core_registry ... ok
+test indexing_runtime_exposes_core_owned_runtime_surfaces_without_a_second_runtime_system ... ok
+test operation_and_attempt_identity_roles_remain_separate_core_values ... ok
+test phase0_capability_remains_opaque_and_domain_neutral ... ok
+test published_engine_registration_can_be_observed_without_turning_the_registry_into_a_router ... ok
+test universal_request_and_response_use_the_core_contract_boundary ... ok
+test unknown_capability_produces_a_core_error_without_indexing_specific_error_translation ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/consistency.rs (target/debug/deps/consistency-dab552654365883a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e.rs (target/debug/deps/e2e-31eec692eaacc183)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/engine.rs (target/debug/deps/engine-04fbc596c3aceba0)
+
+running 17 tests
+test capability_registration_is_a_separate_engine_shell_step ... ok
+test distinct_engine_instances_can_share_one_logical_engine_identity ... ok
+test duplicate_engine_instance_registration_does_not_complete_required_setup ... ok
+test draining_rejects_new_requests_after_serving ... ok
+test engine_registration_is_rejected_outside_the_core_registering_state ... ok
+test engine_construction_exposes_stable_engine_and_instance_identity ... ok
+test engine_registration_is_established_before_readiness_is_attempted ... ok
+test engine_rejects_ready_and_serving_before_registering_state ... ok
+test engine_rejects_registration_lifecycle_entry_before_startup ... ok
+test engine_starts_with_a_core_created_runtime ... ok
+test phase0_capability_registration_is_rejected_outside_the_core_registering_state ... ok
+test engine_start_initializes_the_core_runtime_through_capabilities ... ok
+test shutdown_reaches_stopped_and_cancels_core_shutdown_token ... ok
+test ready_requires_successful_engine_registration_and_phase0_capability_registration ... ok
+test stopped_engine_is_terminal_and_shutdown_remains_idempotent ... ok
+test ready_does_not_admit_normal_requests_until_serving ... ok
+test successful_registration_and_capability_setup_can_reach_ready_then_serving ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fault_injection.rs (target/debug/deps/fault_injection-18dc23c6ba1635e5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/identity.rs (target/debug/deps/identity-ffcfec12e624e0e0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/index.rs (target/debug/deps/index-826e660fa46e4e73)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/integration.rs (target/debug/deps/integration-8dcc4509482eef1d)
+
+running 6 tests
+test capability_dispatch_remains_core_backed_through_the_public_request_boundary ... ok
+test full_request_path_respects_ready_and_draining_admission_boundaries ... ok
+test capability_resolution_comes_from_the_request_contract_without_local_routing ... ok
+test independent_engine_instances_keep_their_complete_integration_state_separate ... ok
+test phase0_public_api_completes_universal_request_to_response_flow ... ok
+test universal_request_context_survives_the_public_runtime_boundary ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/integrity.rs (target/debug/deps/integrity-cdc2badd4d061784)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lifecycle.rs (target/debug/deps/lifecycle-48a03e57318564d3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/observability.rs (target/debug/deps/observability-e1c96e918f838d0f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/query.rs (target/debug/deps/query-38a6cf9f822ad4cf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/recovery.rs (target/debug/deps/recovery-0a921a2d61f0ef2f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/requirement.rs (target/debug/deps/requirement-53ccbb8a85b57272)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/security.rs (target/debug/deps/security-dc1f586cff161fd2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stress.rs (target/debug/deps/stress-8e5a98248476b8ab)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+   Doc-tests nizaam_indexing
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
