@@ -1,13 +1,19 @@
 //! Public library boundary for the Nizaam Indexing Engine.
 //!
-//! The crate root declares the current Indexing module tree up front so later
-//! phases can populate their already-established module directories without
-//! repeatedly changing the top-level module declarations.
+//! The crate root exposes the established Indexing module tree and the public
+//! logical contracts implemented across Phase 1 and Phase 2.
 //!
-//! The future-phase modules declared below are structural scaffolding only in
-//! Phase 0. Their declarations do not implement any future Indexing behavior.
-//! `src/main.rs` / binary targets are intentionally outside this library
-//! boundary for Phase 0.
+//! The public boundary keeps ownership explicit:
+//! - `identity` defines Indexing identities and logical namespaces.
+//! - `index` defines logical index families and Phase 2 index contracts.
+//! - `requirement` defines the source-to-Indexing requirement contract.
+//! - Core-owned runtime, capability, lifecycle, contract, and execution
+//!   infrastructure remains owned by `nizaam-core` and is surfaced here only
+//!   through the Indexing engine API where required.
+//!
+//! Physical storage, index construction, retrieval algorithms, provider
+//! implementations, and domain semantics remain outside these logical
+//! contracts.
 
 pub mod build;
 pub mod capacity;
@@ -32,7 +38,19 @@ pub use engine::{
 pub use error::IndexingResult;
 pub use identity::{
     INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexDefinitionId, IndexDefinitionIdValidationError,
-    IndexDefinitionIdentity, IndexId, IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry,
-    NamespaceRegistryError, NamespaceValidationError,
+    IndexDefinitionIdentity, IndexId, IndexIdGenerationError, IndexIdGenerationVersion,
+    IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry, NamespaceRegistryError,
+    NamespaceValidationError,
 };
-pub use index::IndexFamily;
+pub use index::{
+    ConsistencyRequirement, ConsistencyRequirementValidationError, IndexDefinition,
+    IndexDefinitionValidationError, IndexEntry, IndexEntryValidationError, IndexFamily,
+    IndexVersion, IndexVersionId, IndexVersionIdValidationError, IndexVersionValidationError,
+    KeyDefinition, KeyDefinitionValidationError, KeyField, KeyMaterial, KeyMaterialValidationError,
+    MetricKind, ObjectReference, ObjectReferenceValidationError, QueryHit, QueryHitValidationError,
+    QueryRequest, QueryRequestValidationError, QueryResult, QueryResultValidationError,
+    SchemaVersion, SchemaVersionValidationError, SimilarityEntry, SimilarityEntryValidationError,
+    SourceVersion, SourceVersionValidationError, TargetReferenceType,
+    TargetReferenceTypeValidationError, Uniqueness,
+};
+pub use requirement::{IndexRequirement, IndexRequirementValidationError};

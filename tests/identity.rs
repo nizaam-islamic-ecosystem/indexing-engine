@@ -1,14 +1,23 @@
-//! Level 3 integration tests for Phase 1 identity primitives.
+//! Level 3 integration tests for the Phase 1 and Phase 2 identity boundaries.
 //!
-//! These tests verify the public identity API as a consumer would use it.
-//! They intentionally remain limited to the Phase 1 identity boundaries:
-//! `IndexId`, `IndexNamespace`, `NamespaceRegistry`, `IndexDefinitionId`,
-//! `IndexDefinitionIdentity`, and `IndexFamily`.
+//! These tests exercise the public identity API as a downstream consumer would.
+//! Phase 1 identity behavior remains covered, while Phase 2 adds regression
+//! checks for `ObjectReference`, `IndexVersion`, source/schema version metadata,
+//! and separation from Core contract-version identity.
+//!
+//! The tests intentionally verify identity boundaries only. They do not test
+//! physical storage, provider selection, query execution, or domain-object
+//! semantics.
 
+use nizaam_core::contracts::Version as CoreContractVersion;
 use nizaam_indexing::identity::{
-    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace, NamespaceRegistry,
+    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexIdGenerationVersion, IndexNamespace,
+    NamespaceRegistry,
 };
-use nizaam_indexing::index::IndexFamily;
+use nizaam_indexing::index::{
+    IndexFamily, IndexVersion, IndexVersionId, KeyMaterial, ObjectReference, SchemaVersion,
+    SourceVersion,
+};
 
 fn index_id(seed: u8) -> IndexId {
     IndexId::from_bytes([seed; 64])
@@ -20,6 +29,32 @@ fn namespace(value: &str) -> IndexNamespace {
 
 fn definition_id(value: &str) -> IndexDefinitionId {
     IndexDefinitionId::new(value).expect("test definition ID must be valid")
+}
+
+fn object_reference(source: &str, reference: &str) -> ObjectReference {
+    ObjectReference::new(source, reference).expect("test object reference must be valid")
+}
+
+fn index_version(value: &str) -> IndexVersion {
+    let id = IndexVersionId::new(value).expect("test index version ID must be valid");
+    IndexVersion::new(id)
+}
+
+fn source_version(value: &str) -> SourceVersion {
+    SourceVersion::new(value).expect("test source version must be valid")
+}
+
+fn schema_version(value: &str) -> SchemaVersion {
+    SchemaVersion::new(value).expect("test schema version must be valid")
+}
+
+fn generated_index_id(
+    namespace: &IndexNamespace,
+    definition: &IndexDefinitionId,
+    key_material: &KeyMaterial,
+) -> IndexId {
+    IndexId::generate(namespace, definition, key_material)
+        .expect("test key material must produce a valid index ID")
 }
 
 #[test]
@@ -46,11 +81,88 @@ fn index_id_is_independent_from_definition_identity() {
         IndexFamily::Identity,
     );
 
-    // `IndexId` and `IndexDefinitionIdentity` are separate public identity
-    // concepts. The integration test intentionally keeps them as separate
-    // values rather than introducing any conversion or coupling.
     assert_eq!(index.as_bytes(), &[0x22; 64]);
     assert_eq!(definition.definition_id().as_str(), "definition-a");
+}
+
+#[test]
+fn index_id_is_distinct_from_index_definition_id() {
+    let index = index_id(0x23);
+    let definition_id = definition_id("definition-b");
+
+    assert_eq!(index.as_bytes(), &[0x23; 64]);
+    assert_eq!(definition_id.as_str(), "definition-b");
+
+    fn accepts_index_id(_: &IndexId) {}
+    fn accepts_definition_id(_: &IndexDefinitionId) {}
+
+    accepts_index_id(&index);
+    accepts_definition_id(&definition_id);
+}
+
+#[test]
+fn generated_index_id_is_deterministic_for_identical_logical_input() {
+    let namespace = namespace("quran.text");
+    let definition = definition_id("verse-term");
+    let key = KeyMaterial::text("lemma");
+
+    let first = generated_index_id(&namespace, &definition, &key);
+    let second = generated_index_id(&namespace, &definition, &key);
+
+    assert_eq!(first, second);
+    assert_eq!(first.as_bytes().len(), 64);
+}
+
+#[test]
+fn generated_index_id_changes_when_namespace_definition_or_key_material_changes() {
+    let name_space = namespace("quran.text");
+    let alternate_namespace = namespace("quran.word");
+    let definition = definition_id("verse-term");
+    let alternate_definition = definition_id("verse-lemma");
+    let key = KeyMaterial::text("lemma");
+    let alternate_key = KeyMaterial::text("root");
+
+    let base = generated_index_id(&name_space, &definition, &key);
+    let namespace_changed = generated_index_id(&alternate_namespace, &definition, &key);
+    let definition_changed = generated_index_id(&name_space, &alternate_definition, &key);
+    let key_changed = generated_index_id(&name_space, &definition, &alternate_key);
+
+    assert_ne!(base, namespace_changed);
+    assert_ne!(base, definition_changed);
+    assert_ne!(base, key_changed);
+}
+
+#[test]
+fn equivalent_map_key_material_uses_one_canonical_index_id() {
+    let namespace = namespace("quran.text");
+    let definition = definition_id("verse-term");
+
+    let first = KeyMaterial::map([
+        ("source", KeyMaterial::text("quran")),
+        ("verse", KeyMaterial::Unsigned(1)),
+    ])
+    .expect("first key material must be valid");
+    let second = KeyMaterial::map([
+        ("verse", KeyMaterial::Unsigned(1)),
+        ("source", KeyMaterial::text("quran")),
+    ])
+    .expect("second key material must be valid");
+
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(
+        generated_index_id(&namespace, &definition, &first),
+        generated_index_id(&namespace, &definition, &second)
+    );
+}
+
+#[test]
+fn index_id_generation_version_is_separate_from_index_version() {
+    let generation_version = IndexIdGenerationVersion::CURRENT;
+    let index_version = index_version("index-v1");
+
+    assert_eq!(generation_version.value(), 1);
+    assert_eq!(IndexId::generation_version(), generation_version);
+    assert_eq!(index_version.id().as_str(), "index-v1");
 }
 
 #[test]
@@ -109,7 +221,7 @@ fn unregistered_namespace_is_absent() {
 }
 
 #[test]
-fn one_identity_can_be_associated_with_multiple_logical_spaces() {
+fn one_index_identity_can_be_associated_with_multiple_logical_spaces() {
     let index = index_id(0x33);
 
     let first_namespace = namespace("core.identity");
@@ -132,8 +244,6 @@ fn one_identity_can_be_associated_with_multiple_logical_spaces() {
         second_definition.definition_id()
     );
 
-    // The concrete index identity remains its own Phase 1 concept and does
-    // not become a namespace or definition identity.
     assert_eq!(index.as_bytes(), &[0x33; 64]);
 }
 
@@ -149,9 +259,6 @@ fn definition_identity_is_separate_from_concrete_index_identity() {
     assert_eq!(definition.family(), IndexFamily::Identity);
     assert_eq!(definition.namespace().as_str(), "core.identity");
     assert_eq!(definition.definition_id().as_str(), "identity-definition");
-
-    // No Phase 1 conversion or equality relationship is introduced between
-    // `IndexId` and `IndexDefinitionIdentity`.
     assert_eq!(index.as_bytes(), &[0x44; 64]);
 }
 
@@ -175,4 +282,108 @@ fn identity_components_compose_without_collapsing_into_one_identity_type() {
     assert_eq!(definition.namespace(), &namespace);
     assert_eq!(definition.family(), IndexFamily::Identity);
     assert_eq!(index.as_bytes(), &[0x55; 64]);
+}
+
+#[test]
+fn index_namespace_is_distinct_from_object_reference() {
+    let namespace = namespace("search.documents");
+    let reference = object_reference("documents", "document:42");
+
+    assert_eq!(namespace.as_str(), "search.documents");
+    assert_eq!(reference.source(), "documents");
+    assert_eq!(reference.object_reference(), "document:42");
+
+    fn accepts_namespace(_: &IndexNamespace) {}
+    fn accepts_object_reference(_: &ObjectReference) {}
+
+    accepts_namespace(&namespace);
+    accepts_object_reference(&reference);
+}
+
+#[test]
+fn different_object_reference_sources_remain_distinct() {
+    let first = object_reference("quran", "verse:1:1");
+    let second = object_reference("hadith", "muslim:1");
+
+    assert_ne!(first, second);
+    assert_ne!(first.source(), second.source());
+    assert_ne!(first.object_reference(), second.object_reference());
+}
+
+#[test]
+fn index_version_has_its_own_identity_type() {
+    let version = index_version("index-v1");
+
+    assert_eq!(version.id().as_str(), "index-v1");
+
+    fn accepts_index_version(_: &IndexVersion) {}
+    accepts_index_version(&version);
+}
+
+#[test]
+fn index_version_is_distinct_from_source_and_schema_versions() {
+    let index_version = index_version("index-v2");
+    let source_version = source_version("source-v2");
+    let schema_version = schema_version("schema-v2");
+
+    assert_eq!(index_version.id().as_str(), "index-v2");
+    assert_eq!(source_version.as_str(), "source-v2");
+    assert_eq!(schema_version.as_str(), "schema-v2");
+
+    fn accepts_index_version(_: &IndexVersion) {}
+    fn accepts_source_version(_: &SourceVersion) {}
+    fn accepts_schema_version(_: &SchemaVersion) {}
+
+    accepts_index_version(&index_version);
+    accepts_source_version(&source_version);
+    accepts_schema_version(&schema_version);
+}
+
+#[test]
+fn index_version_is_distinct_from_core_contract_version() {
+    let index_version = index_version("1.0.0");
+    let contract_version = CoreContractVersion::new(1, 0, 0);
+
+    assert_eq!(index_version.id().as_str(), "1.0.0");
+    assert_eq!(contract_version.to_string(), "1.0.0");
+
+    fn accepts_index_version(_: &IndexVersion) {}
+    fn accepts_core_contract_version(_: &CoreContractVersion) {}
+
+    accepts_index_version(&index_version);
+    accepts_core_contract_version(&contract_version);
+}
+
+#[test]
+fn object_reference_does_not_become_a_new_index_identity() {
+    let index = index_id(0x66);
+    let reference = object_reference("quran", "verse:2:255");
+
+    assert_eq!(index.as_bytes(), &[0x66; 64]);
+    assert_eq!(reference.source(), "quran");
+    assert_eq!(reference.object_reference(), "verse:2:255");
+
+    fn accepts_object_reference(_: &ObjectReference) {}
+    accepts_object_reference(&reference);
+}
+
+#[test]
+fn logical_identity_dimensions_can_coexist_without_being_interchangeable() {
+    let namespace = namespace("search.documents");
+    let definition = IndexDefinitionIdentity::new(
+        definition_id("documents.v1"),
+        namespace.clone(),
+        IndexFamily::Inverted,
+    );
+    let index = index_id(0x77);
+    let version = index_version("documents-v1");
+    let reference = object_reference("documents", "document:77");
+
+    assert_eq!(namespace.as_str(), "search.documents");
+    assert_eq!(definition.namespace(), &namespace);
+    assert_eq!(definition.family(), IndexFamily::Inverted);
+    assert_eq!(index.as_bytes(), &[0x77; 64]);
+    assert_eq!(version.id().as_str(), "documents-v1");
+    assert_eq!(reference.source(), "documents");
+    assert_eq!(reference.object_reference(), "document:77");
 }

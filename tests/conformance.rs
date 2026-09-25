@@ -1,12 +1,14 @@
-//! Phase 0 architectural conformance tests.
+//! Phase 2 architectural conformance tests.
 //!
 //! These tests protect the boundaries established between `nizaam-indexing`
-//! and `nizaam-core`. They focus on ownership, identity roles, universal
-//! contracts, Core-backed runtime/capability infrastructure, external engine
-//! registration, and the deliberately opaque Phase 0 capability.
+//! and `nizaam-core`. They preserve the Phase 0 runtime/capability checks while
+//! extending conformance coverage to the Phase 2 logical indexing contracts:
+//! requirements, definitions, entries, references, versions, similarity
+//! entries, and provider-neutral query/result contracts.
 //!
-//! They do not attempt to test future index construction, query execution,
-//! storage providers, physical index algorithms, or domain semantics.
+//! They deliberately do not test physical index construction, storage
+//! providers, query execution, embedding generation, domain-object hydration,
+//! or domain-specific semantic models.
 
 mod common;
 
@@ -27,6 +29,15 @@ use nizaam_core::identity::{
 use nizaam_core::operation::OperationContext;
 use nizaam_core::runtime::{LifecycleState, RequestAdmissionError};
 use nizaam_core::status::Status;
+use nizaam_indexing::identity::{
+    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
+};
+use nizaam_indexing::index::{
+    ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion, IndexVersionId,
+    KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryRequest, QueryResult,
+    SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
+};
+use nizaam_indexing::requirement::IndexRequirement;
 use nizaam_indexing::{IndexingEngine, IndexingRegistration, IndexingRuntime};
 
 fn core_shutdown_token(_: &nizaam_core::runtime::CancellationToken) {}
@@ -60,6 +71,38 @@ fn envelope(
         metadata,
         EncodedPayload::new(descriptor.payload, payload.to_vec()),
     )
+}
+
+fn phase2_index_id(byte: u8) -> IndexId {
+    IndexId::from_bytes([byte; 64])
+}
+
+fn phase2_namespace(value: &str) -> IndexNamespace {
+    IndexNamespace::new(value).expect("test namespace must be valid")
+}
+
+fn phase2_definition_id(value: &str) -> IndexDefinitionId {
+    IndexDefinitionId::new(value).expect("test definition ID must be valid")
+}
+
+fn phase2_key_definition() -> KeyDefinition {
+    KeyDefinition::new(["field"]).expect("test key definition must be valid")
+}
+
+fn phase2_target_reference_type() -> TargetReferenceType {
+    TargetReferenceType::new("source.object").expect("test target reference type must be valid")
+}
+
+fn phase2_consistency() -> ConsistencyRequirement {
+    ConsistencyRequirement::new("logical").expect("test consistency requirement must be valid")
+}
+
+fn phase2_object_reference(source: &str, object_reference: &str) -> ObjectReference {
+    ObjectReference::new(source, object_reference).expect("test object reference must be valid")
+}
+
+fn phase2_index_version(id: &str) -> IndexVersion {
+    IndexVersion::new(IndexVersionId::new(id).expect("test index version ID must be valid"))
 }
 
 #[test]
@@ -478,4 +521,203 @@ fn core_identity_types_are_used_directly_at_the_registration_boundary() {
 
     assert_eq!(registration.engine_id(), &engine_id);
     assert_eq!(registration.engine_instance_id(), &instance_id);
+}
+
+#[test]
+fn phase2_requirement_is_source_owned_input_and_normalizes_into_an_index_definition() {
+    let requirement = IndexRequirement::new(
+        phase2_namespace("conformance.requirement"),
+        IndexFamily::Inverted,
+        phase2_key_definition(),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        Some(SourceVersion::new("source-v2").expect("source version must be valid")),
+        Some(SchemaVersion::new("schema-v3").expect("schema version must be valid")),
+    )
+    .expect("requirement should be valid");
+
+    let definition = requirement
+        .normalize(phase2_definition_id("conformance.requirement.v1"))
+        .expect("normalization should produce a valid definition");
+
+    assert_eq!(definition.namespace(), requirement.namespace());
+    assert_eq!(definition.family(), requirement.family());
+    assert_eq!(definition.key_definition(), requirement.key_definition());
+    assert_eq!(
+        definition.target_reference_type(),
+        requirement.target_reference_type()
+    );
+    assert_eq!(
+        definition.definition_id().as_str(),
+        "conformance.requirement.v1"
+    );
+
+    // Normalization creates a logical IndexDefinition. It does not create a
+    // concrete IndexId, select a provider, or execute index construction.
+}
+
+#[test]
+fn phase2_index_definition_is_logical_and_provider_neutral() {
+    let identity = IndexDefinitionIdentity::new(
+        phase2_definition_id("conformance.logical-definition"),
+        phase2_namespace("conformance.logical"),
+        IndexFamily::Inverted,
+    );
+
+    let definition = IndexDefinition::new(
+        identity.clone(),
+        phase2_key_definition(),
+        phase2_target_reference_type(),
+        Uniqueness::Unique,
+        phase2_consistency(),
+        Some(SourceVersion::new("source-v1").expect("source version must be valid")),
+        Some(SchemaVersion::new("schema-v1").expect("schema version must be valid")),
+    )
+    .expect("definition should be valid");
+
+    assert_eq!(definition.identity(), &identity);
+    assert_eq!(definition.family(), IndexFamily::Inverted);
+    assert_eq!(definition.uniqueness(), Uniqueness::Unique);
+    assert_eq!(definition.source_version().unwrap().as_str(), "source-v1");
+    assert_eq!(definition.schema_version().unwrap().as_str(), "schema-v1");
+
+    // The public contract contains logical fields only. No provider,
+    // partition, storage engine, physical algorithm, or execution handle is
+    // required to construct the definition.
+}
+
+#[test]
+fn phase2_index_entry_is_a_generic_key_to_object_reference_association() {
+    let key = KeyMaterial::map([
+        ("field", KeyMaterial::text("value")),
+        ("ordinal", KeyMaterial::Unsigned(1)),
+    ])
+    .expect("structured key material must be valid");
+    let reference = phase2_object_reference("source-a", "object-42");
+
+    let entry =
+        IndexEntry::new(key.clone(), reference.clone()).expect("index entry should be valid");
+
+    assert_eq!(entry.key(), &key);
+    assert_eq!(entry.target(), &reference);
+
+    // The entry owns no domain object, database-row structure, or storage
+    // provider state. Its target remains an opaque, source-owned reference.
+}
+
+#[test]
+fn phase2_object_reference_remains_source_owned_and_does_not_create_canonical_identity() {
+    let first = phase2_object_reference("source-a", "object-7");
+    let second = phase2_object_reference("source-b", "object-7");
+
+    assert_eq!(first.object_reference(), "object-7");
+    assert_eq!(second.object_reference(), "object-7");
+    assert_ne!(first.source(), second.source());
+
+    let index_id = phase2_index_id(0x7a);
+    assert_eq!(index_id.as_bytes(), &[0x7a; 64]);
+
+    // The same source-level reference text can occur under different source
+    // ownership. ObjectReference therefore remains a source-owned reference,
+    // not a replacement Object/Index identity.
+    assert_ne!(first, second);
+}
+
+#[test]
+fn phase2_similarity_entry_accepts_generic_representation_without_embedding_or_relationship_semantics()
+ {
+    let representation = KeyMaterial::Sequence(vec![
+        KeyMaterial::Unsigned(10),
+        KeyMaterial::Unsigned(20),
+        KeyMaterial::Unsigned(30),
+    ]);
+    let target = phase2_object_reference("similarity-source", "object-9");
+
+    let entry = SimilarityEntry::new(representation.clone(), target.clone())
+        .expect("similarity entry should be valid");
+
+    assert_eq!(entry.representation(), &representation);
+    assert_eq!(entry.target(), &target);
+    assert!(entry.metadata().is_none());
+
+    // Phase 2 carries generic representation material. It does not require an
+    // embedding model, generator, ANN algorithm, vector provider, or semantic
+    // relationship/predicate model.
+}
+
+#[test]
+fn phase2_relationship_family_remains_a_generic_index_family() {
+    let identity = IndexDefinitionIdentity::new(
+        phase2_definition_id("conformance.relationship"),
+        phase2_namespace("conformance.relationships"),
+        IndexFamily::Relationship,
+    );
+
+    let definition = IndexDefinition::new(
+        identity,
+        KeyDefinition::new(["field_a", "field_b"])
+            .expect("relationship key definition must be valid"),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        None,
+        None,
+    )
+    .expect("relationship definition should be valid");
+
+    assert_eq!(definition.family(), IndexFamily::Relationship);
+    assert_eq!(definition.key_definition().len(), 2);
+
+    // IndexFamily::Relationship is only the logical index-family classification.
+    // It does not introduce predicate semantics, a graph model, or KG storage.
+}
+
+#[test]
+fn phase2_versions_remain_separate_from_one_another_and_from_core_contract_version() {
+    let core_contract_version = Version::new(1, 0, 0);
+    let source_version = SourceVersion::new("source-v4").expect("source version must be valid");
+    let schema_version = SchemaVersion::new("schema-v2").expect("schema version must be valid");
+    let index_version = phase2_index_version("index-v7");
+
+    // Core contract version is still represented by Core's `Version` type and
+    // used at the universal contract boundary.
+    assert_eq!(core_contract_version, Version::new(1, 0, 0));
+
+    assert_eq!(source_version.as_str(), "source-v4");
+    assert_eq!(schema_version.as_str(), "schema-v2");
+    assert_eq!(index_version.id().as_str(), "index-v7");
+
+    assert_ne!(source_version.as_str(), schema_version.as_str());
+    assert_ne!(schema_version.as_str(), index_version.id().as_str());
+
+    // The four version concepts remain owned by their respective contracts:
+    // Core contract compatibility, source state, schema compatibility, and
+    // logical index state.
+}
+
+#[test]
+fn phase2_query_contracts_are_reference_oriented_and_do_not_execute_queries() {
+    let index_id = phase2_index_id(0x55);
+    let query = QueryRequest::new(index_id, KeyMaterial::text("lookup"))
+        .expect("query request should be valid");
+
+    let reference = phase2_object_reference("source-q", "object-11");
+    let hit = QueryHit::new(reference.clone())
+        .with_metrics(Some(0.91), None)
+        .expect("query hit metrics should be valid");
+    let result = QueryResult::new(
+        phase2_index_id(0x55),
+        phase2_index_version("index-v1"),
+        vec![hit],
+    )
+    .expect("query result should be valid");
+
+    assert_eq!(query.query(), &KeyMaterial::text("lookup"));
+    assert_eq!(result.hits().len(), 1);
+    assert_eq!(result.hits()[0].reference(), &reference);
+    assert_eq!(result.hits()[0].score(), Some(0.91));
+
+    // QueryRequest and QueryResult are logical retrieval contracts. They do not
+    // contain an executor, provider handle, or hydrated domain object.
 }
