@@ -999,7 +999,7 @@ architectural sequence.
 
 #### Status
 
-**Not Started**
+**Completed**
 
 ##### Goal
 
@@ -2339,28 +2339,28 @@ Phase 0 is complete when all of the following are true:
 
 #### Verification Checklist
 
-- [ ] Library crate builds against nizaam-core
-- [ ] EngineId / EngineInstanceId roles are distinct
-- [ ] Engine registration works
-- [ ] Capability registration works
-- [ ] Runtime lifecycle startup works
-- [ ] READY is distinct from SERVING
-- [ ] Non-serving admission is rejected
-- [ ] Serving request reaches the intended capability
-- [ ] OperationContext is preserved
-- [ ] EngineContext is used
-- [ ] Cancellation/deadline boundary is preserved
-- [ ] UniversalRequest / UniversalResponse boundary is preserved
-- [ ] Capability dispatch uses Core infrastructure
-- [ ] Control Plane integration does not create local global routing
-- [ ] Shutdown reaches DRAINING then STOPPED
-- [ ] No domain semantics entered Phase 0
-- [ ] No physical indexing technology entered Phase 0
-- [ ] No indexing algorithm entered Phase 0
-- [ ] Unit tests exist for Phase 0 implementation behavior
-- [ ] Integration tests cover the complete Phase 0 flow
-- [ ] Conformance tests protect architectural boundaries
-- [ ] Full workspace verification passes
+- [x] Library crate builds against nizaam-core
+- [x] EngineId / EngineInstanceId roles are distinct
+- [x] Engine registration works
+- [x] Capability registration works
+- [x] Runtime lifecycle startup works
+- [x] READY is distinct from SERVING
+- [x] Non-serving admission is rejected
+- [x] Serving request reaches the intended capability
+- [x] OperationContext is preserved
+- [x] EngineContext is used
+- [x] Cancellation/deadline boundary is preserved
+- [x] UniversalRequest / UniversalResponse boundary is preserved
+- [x] Capability dispatch uses Core infrastructure
+- [x] Control Plane integration does not create local global routing
+- [x] Shutdown reaches DRAINING then STOPPED
+- [x] No domain semantics entered Phase 0
+- [x] No physical indexing technology entered Phase 0
+- [x] No indexing algorithm entered Phase 0
+- [x] Unit tests exist for Phase 0 implementation behavior
+- [x] Integration tests cover the complete Phase 0 flow
+- [x] Conformance tests protect architectural boundaries
+- [x] Full workspace verification passes
 
 ---
 
@@ -2403,7 +2403,7 @@ later operational / hardening phases
 
 #### Status
 
-**Not Started**
+**In Progress**
 
 ##### Goal
 
