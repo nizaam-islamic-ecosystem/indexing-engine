@@ -26,7 +26,7 @@ pub mod requirement;
 pub mod security;
 
 pub use engine::{
-    CapabilitySet, IndexingEngine, IndexingRegistration, IndexingRuntime, RegistrationResult,
-    RuntimeDispatchResult,
+    CapabilitySet, EngineSetupError, IndexingEngine, IndexingRegistration, IndexingRuntime,
+    RegistrationResult, RequestHandlingError, RuntimeDispatchResult, UniversalRequestResult,
 };
 pub use error::IndexingResult;

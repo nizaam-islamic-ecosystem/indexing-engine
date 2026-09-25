@@ -24,14 +24,17 @@ pub use capability::CapabilitySet;
 pub use registration::{IndexingRegistration, RegistrationResult};
 pub use runtime::{IndexingRuntime, RuntimeDispatchResult};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use nizaam_core::capability::{
-    CapabilityDispatchResult, CapabilityError, CapabilityInvocation, CapabilityOutcome,
-    RegistryError as CapabilityRegistryError,
+    CapabilityDefinition, CapabilityDispatchResult, CapabilityError, CapabilityHandler,
+    CapabilityInvocation, CapabilityOutcome, RegistryError as CapabilityRegistryError,
 };
 use nizaam_core::contracts::{
-    EncodedPayload, Interaction, MessageEnvelope, UniversalRequest, UniversalResponse,
+    EncodedPayload, Interaction, MessageEnvelope, Participants, UniversalRequest, UniversalResponse,
 };
 use nizaam_core::control_plane::registry::{
     EngineRegistry, RegistryError as ControlPlaneRegistryError,
@@ -62,13 +65,19 @@ pub struct IndexingEngine {
 
 /// Thin facade-level composition error for setup operations.
 ///
-/// The variants preserve the underlying Core error types rather than creating
-/// Indexing-specific lifecycle or registry failure categories.
+/// Core lifecycle and registry failures are preserved directly. The ownership
+/// mismatch is a local composition invariant of the Indexing Engine boundary,
+/// where a public capability registration request must belong to this engine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EngineSetupError {
     Lifecycle(InvalidTransition),
     Registry(ControlPlaneRegistryError),
     CapabilityRegistry(CapabilityRegistryError),
+    CapabilityOwnerMismatch {
+        capability_id: nizaam_core::identity::CapabilityId,
+        expected_engine: EngineId,
+        actual_engine: EngineId,
+    },
 }
 
 impl std::fmt::Display for EngineSetupError {
@@ -77,6 +86,17 @@ impl std::fmt::Display for EngineSetupError {
             Self::Lifecycle(error) => error.fmt(formatter),
             Self::Registry(error) => error.fmt(formatter),
             Self::CapabilityRegistry(error) => error.fmt(formatter),
+            Self::CapabilityOwnerMismatch {
+                capability_id,
+                expected_engine,
+                actual_engine,
+            } => write!(
+                formatter,
+                "capability {} is owned by engine {}, expected {}",
+                capability_id.as_str(),
+                actual_engine.as_str(),
+                expected_engine.as_str(),
+            ),
         }
     }
 }
@@ -101,13 +121,59 @@ impl From<CapabilityRegistryError> for EngineSetupError {
     }
 }
 
+/// Error produced while handling a request at the Indexing Engine boundary.
+///
+/// Core remains authoritative for request admission. The additional target
+/// errors here describe a local-engine routing invariant that is not part of
+/// Core's lifecycle admission error contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RequestHandlingError {
+    Admission(RequestAdmissionError),
+    TargetEngineMismatch {
+        expected: EngineId,
+        actual: EngineId,
+    },
+    TargetInstanceMismatch {
+        expected: EngineInstanceId,
+        actual: EngineInstanceId,
+    },
+}
+
+impl std::fmt::Display for RequestHandlingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(error) => error.fmt(formatter),
+            Self::TargetEngineMismatch { expected, actual } => write!(
+                formatter,
+                "request target engine {} does not match local engine {}",
+                actual.as_str(),
+                expected.as_str(),
+            ),
+            Self::TargetInstanceMismatch { expected, actual } => write!(
+                formatter,
+                "request target instance {} does not match local instance {}",
+                actual.as_str(),
+                expected.as_str(),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RequestHandlingError {}
+
+impl From<RequestAdmissionError> for RequestHandlingError {
+    fn from(error: RequestAdmissionError) -> Self {
+        Self::Admission(error)
+    }
+}
+
 /// Result of handling one admitted UniversalRequest.
 ///
-/// The outer Core admission error remains distinct from the inner Core
-/// capability error. Successful capability execution yields a Core
-/// `UniversalResponse`.
+/// Core's admission error remains preserved inside [`RequestHandlingError`],
+/// while local request-target validation has its own boundary error. Successful
+/// capability execution yields a Core `UniversalResponse`.
 pub type UniversalRequestResult =
-    Result<Result<UniversalResponse, CapabilityError>, RequestAdmissionError>;
+    Result<Result<UniversalResponse, CapabilityError>, RequestHandlingError>;
 
 impl IndexingEngine {
     /// Creates a new Indexing Engine facade in the Core `Created` state.
@@ -184,6 +250,31 @@ impl IndexingEngine {
         Ok(())
     }
 
+    /// Registers one capability for this Indexing Engine.
+    ///
+    /// Capability registration is accepted only while the Core runtime is in
+    /// `Registering`, and the definition must name this engine as its owner.
+    /// The underlying registry and registration errors remain Core-owned.
+    pub fn register_capability(
+        &self,
+        definition: CapabilityDefinition,
+        handler: Arc<dyn CapabilityHandler>,
+    ) -> Result<(), EngineSetupError> {
+        self.require_state(LifecycleState::Registering)?;
+
+        if definition.owning_engine() != self.engine_id() {
+            return Err(EngineSetupError::CapabilityOwnerMismatch {
+                capability_id: definition.capability_id().clone(),
+                expected_engine: self.engine_id().clone(),
+                actual_engine: definition.owning_engine().clone(),
+            });
+        }
+
+        self.capabilities
+            .register(definition, handler)
+            .map_err(EngineSetupError::CapabilityRegistry)
+    }
+
     /// Registers the private Phase 0 bootstrap capability under this engine's
     /// logical `EngineId`.
     ///
@@ -236,6 +327,24 @@ impl IndexingEngine {
         self.runtime.admit_request()?;
 
         let envelope = &request.universal_event().envelope;
+        let participants = &envelope.metadata.participants;
+
+        if participants.target != self.engine_id().clone() {
+            return Err(RequestHandlingError::TargetEngineMismatch {
+                expected: self.engine_id().clone(),
+                actual: participants.target.clone(),
+            });
+        }
+
+        if let Some(target_instance) = participants.target_instance.as_ref()
+            && target_instance != self.engine_instance_id()
+        {
+            return Err(RequestHandlingError::TargetInstanceMismatch {
+                expected: self.engine_instance_id().clone(),
+                actual: target_instance.clone(),
+            });
+        }
+
         let descriptor = &envelope.metadata.descriptor;
 
         let context = self.runtime.context(envelope.operation_context.clone());
@@ -247,19 +356,36 @@ impl IndexingEngine {
 
         match self.capabilities.dispatch(&context, &invocation) {
             CapabilityDispatchResult::Outcome(outcome) => {
-                Ok(Ok(Self::response_from_outcome(request, outcome)))
+                Ok(Ok(self.response_from_outcome(request, outcome)))
             }
             CapabilityDispatchResult::Error(error) => Ok(Err(error)),
         }
     }
 
     fn response_from_outcome(
+        &self,
         request: &UniversalRequest,
         outcome: CapabilityOutcome,
     ) -> UniversalResponse {
         let request_envelope = &request.universal_event().envelope;
+        let request_participants = &request_envelope.metadata.participants;
         let mut metadata = request_envelope.metadata.clone();
         metadata.descriptor.interaction = Interaction::Response;
+
+        let mut participants = Participants::new(
+            self.engine_id().clone(),
+            request_participants.sender.clone(),
+        );
+
+        if let Some(instance) = request_participants.target_instance.clone() {
+            participants = participants.with_sender_instance(instance);
+        }
+
+        if let Some(instance) = request_participants.sender_instance.clone() {
+            participants = participants.with_target_instance(instance);
+        }
+
+        metadata.participants = participants;
 
         let payload_descriptor = metadata.descriptor.payload.clone();
         let response_envelope = MessageEnvelope::new(
@@ -532,6 +658,14 @@ mod tests {
             Participants::new(
                 EngineId::new("nizaam.test.sender").expect("sender id must be valid"),
                 EngineId::new("nizaam.indexing.test").expect("target id must be valid"),
+            )
+            .with_sender_instance(
+                EngineInstanceId::new("nizaam.test.sender.instance")
+                    .expect("sender instance id must be valid"),
+            )
+            .with_target_instance(
+                EngineInstanceId::new("nizaam.indexing.test.instance")
+                    .expect("target instance id must be valid"),
             ),
         );
         let operation = Operation::new(
@@ -574,6 +708,30 @@ mod tests {
             response.universal_event().envelope.payload.bytes(),
             b"public-phase0-payload"
         );
+
+        let participants = &response.universal_event().envelope.metadata.participants;
+        assert_eq!(
+            participants.sender,
+            EngineId::new("nizaam.indexing.test").expect("engine id must be valid")
+        );
+        assert_eq!(
+            participants.target,
+            EngineId::new("nizaam.test.sender").expect("sender id must be valid")
+        );
+        assert_eq!(
+            participants.sender_instance.as_ref(),
+            Some(
+                &EngineInstanceId::new("nizaam.indexing.test.instance")
+                    .expect("engine instance id must be valid")
+            )
+        );
+        assert_eq!(
+            participants.target_instance.as_ref(),
+            Some(
+                &EngineInstanceId::new("nizaam.test.sender.instance")
+                    .expect("sender instance id must be valid")
+            )
+        );
     }
 
     #[test]
@@ -584,8 +742,111 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RequestAdmissionError::NotServing(LifecycleState::Created))
+            Err(RequestHandlingError::Admission(
+                RequestAdmissionError::NotServing(LifecycleState::Created)
+            ))
         ));
+    }
+
+    #[test]
+    fn misaddressed_logical_engine_request_is_rejected_before_capability_dispatch() {
+        let (engine, _registry, _capability_id) = prepare_serving_engine();
+        let mut request = universal_request(b"wrong-engine");
+        request.event.envelope.metadata.participants.target =
+            EngineId::new("nizaam.other.engine").expect("test engine id must be valid");
+
+        let result = engine.handle_request(&request);
+
+        assert!(matches!(
+            result,
+            Err(RequestHandlingError::TargetEngineMismatch { expected, actual })
+                if expected == engine.engine_id().clone()
+                    && actual.as_str() == "nizaam.other.engine"
+        ));
+    }
+
+    #[test]
+    fn misaddressed_engine_instance_request_is_rejected_before_capability_dispatch() {
+        let (engine, _registry, _capability_id) = prepare_serving_engine();
+        let mut request = universal_request(b"wrong-instance");
+        request.event.envelope.metadata.participants.target_instance = Some(
+            EngineInstanceId::new("nizaam.other.instance")
+                .expect("test engine instance id must be valid"),
+        );
+
+        let result = engine.handle_request(&request);
+
+        assert!(matches!(
+            result,
+            Err(RequestHandlingError::TargetInstanceMismatch { expected, actual })
+                if expected == engine.engine_instance_id().clone()
+                    && actual.as_str() == "nizaam.other.instance"
+        ));
+    }
+
+    #[test]
+    fn public_capability_registration_rejects_a_foreign_engine_owner() {
+        let engine = new_engine();
+        let registry = EngineRegistry::new();
+
+        engine.start().unwrap();
+        engine.begin_registration().unwrap();
+
+        let capability_id = CapabilityId::new("nizaam.indexing.module.foreign-owner")
+            .expect("test capability id must be valid");
+        let foreign_engine =
+            EngineId::new("nizaam.foreign.engine").expect("test engine id must be valid");
+        let definition = CapabilityDefinition::new(
+            capability_id.clone(),
+            foreign_engine.clone(),
+            "Foreign-owner capability",
+        )
+        .expect("test capability definition must be valid");
+
+        let result = engine.register_capability(
+            definition,
+            arc_handler(|_, _| Ok(CapabilityOutcome::new(b"must-not-run".to_vec()))),
+        );
+
+        assert_eq!(
+            result,
+            Err(EngineSetupError::CapabilityOwnerMismatch {
+                capability_id,
+                expected_engine: engine.engine_id().clone(),
+                actual_engine: foreign_engine,
+            })
+        );
+        assert!(engine.capabilities().is_empty());
+        assert!(!registry.contains(engine.engine_instance_id()));
+    }
+
+    #[test]
+    fn public_capability_registration_accepts_a_local_engine_owner() {
+        let engine = new_engine();
+        let registry = EngineRegistry::new();
+
+        engine.start().unwrap();
+        engine.begin_registration().unwrap();
+        engine.register_engine(&registry).unwrap();
+
+        let capability_id = CapabilityId::new("nizaam.indexing.module.local-owner")
+            .expect("test capability id must be valid");
+        let definition = CapabilityDefinition::new(
+            capability_id.clone(),
+            engine.engine_id().clone(),
+            "Local-owner capability",
+        )
+        .expect("test capability definition must be valid");
+
+        engine
+            .register_capability(
+                definition,
+                arc_handler(|_, _| Ok(CapabilityOutcome::new(b"local".to_vec()))),
+            )
+            .unwrap();
+
+        assert!(engine.capabilities().contains(&capability_id));
+        assert_eq!(engine.capabilities().len(), 1);
     }
 
     #[test]

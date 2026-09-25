@@ -45,22 +45,20 @@ impl CapabilitySet {
         }
     }
 
-    /// Returns the underlying Core capability registry.
+    /// Returns the underlying Core capability registry to crate-internal
+    /// integration code and tests.
     ///
-    /// The registry remains owned by this capability integration boundary and
-    /// is returned by shared reference so callers cannot replace the registry
-    /// itself.
+    /// It is not exposed through the public engine API because the Core registry
+    /// itself can mutate through shared access. Public callers use the guarded
+    /// `IndexingEngine` registration boundary instead.
     #[must_use]
-    pub fn registry(&self) -> &CapabilityRegistry {
+    pub(crate) fn registry(&self) -> &CapabilityRegistry {
         &self.registry
     }
 
-    /// Registers one engine-owned capability with the Core registry.
-    ///
-    /// Capability ownership is represented by the `EngineId` contained in the
-    /// supplied `CapabilityDefinition`. Engine composition is responsible for
-    /// constructing definitions with the correct logical engine identity.
-    pub fn register(
+    /// Registers one capability with the Core registry from within the Indexing
+    /// Engine crate. Public callers must use the guarded engine facade.
+    pub(crate) fn register(
         &self,
         definition: CapabilityDefinition,
         handler: Arc<dyn CapabilityHandler>,
@@ -68,7 +66,8 @@ impl CapabilitySet {
         self.registry.register(definition, handler)
     }
 
-    /// Registers the private Phase 0 bootstrap capability.
+    /// Registers the private Phase 0 bootstrap capability from within the
+    /// Indexing Engine crate.
     ///
     /// The handler deliberately performs no indexing work. It simply returns
     /// the opaque request payload so the engine can prove:
@@ -84,7 +83,7 @@ impl CapabilitySet {
     ///     ↓
     /// CapabilityOutcome
     /// ```
-    pub fn register_phase0_capability(
+    pub(crate) fn register_phase0_capability(
         &self,
         engine_id: &EngineId,
     ) -> Result<CapabilityId, RegistryError> {
@@ -119,7 +118,7 @@ impl CapabilitySet {
         context: &EngineContext,
         invocation: &CapabilityInvocation,
     ) -> CapabilityDispatchResult {
-        nizaam_core::capability::dispatch(&self.registry, context, invocation)
+        nizaam_core::capability::dispatch(self.registry(), context, invocation)
     }
 
     /// Returns whether a capability is currently registered.

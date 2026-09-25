@@ -76,7 +76,7 @@ impl IndexingRuntime {
     ///
     /// Core remains responsible for validating the legal lifecycle graph and
     /// for preventing invalid or terminal transitions.
-    pub fn transition(&self, next: LifecycleState) -> Result<(), InvalidTransition> {
+    pub(crate) fn transition(&self, next: LifecycleState) -> Result<(), InvalidTransition> {
         self.core.transition(next)
     }
 

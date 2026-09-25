@@ -38,7 +38,7 @@ use nizaam_core::contracts::{
 use nizaam_core::identity::{CapabilityId, EngineInstanceId, MessageId};
 use nizaam_core::runtime::{LifecycleState, RequestAdmissionError};
 use nizaam_core::status::Status;
-use nizaam_indexing::IndexingEngine;
+use nizaam_indexing::{IndexingEngine, RequestHandlingError};
 
 fn request_envelope(
     engine: &IndexingEngine,
@@ -94,15 +94,8 @@ fn prepared_engine() -> (
 }
 
 fn registered_capability_id(engine: &IndexingEngine) -> CapabilityId {
-    engine
-        .capabilities()
-        .registry()
-        .iter()
-        .next()
-        .expect("Phase 0 capability must be registered")
-        .definition()
-        .capability_id()
-        .clone()
+    assert_eq!(engine.capabilities().len(), 1);
+    CapabilityId::new("nizaam.indexing.phase0.probe").expect("Phase 0 capability id must be valid")
 }
 
 #[test]
@@ -197,7 +190,9 @@ fn full_request_path_respects_ready_and_draining_admission_boundaries() {
 
     assert!(matches!(
         engine.handle_request(&request),
-        Err(RequestAdmissionError::NotServing(LifecycleState::Ready))
+        Err(RequestHandlingError::Admission(
+            RequestAdmissionError::NotServing(LifecycleState::Ready),
+        ))
     ));
 
     engine.serve().unwrap();
@@ -212,7 +207,9 @@ fn full_request_path_respects_ready_and_draining_admission_boundaries() {
 
     assert!(matches!(
         engine.handle_request(&request),
-        Err(RequestAdmissionError::NotServing(LifecycleState::Draining))
+        Err(RequestHandlingError::Admission(
+            RequestAdmissionError::NotServing(LifecycleState::Draining),
+        ))
     ));
 }
 

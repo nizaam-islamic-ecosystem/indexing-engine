@@ -15,7 +15,7 @@ use common::{
     engine_registry, operation_context, register_engine, test_engine, universal_request,
     universal_response,
 };
-use nizaam_core::capability::{CapabilityDispatchResult, CapabilityError, CapabilityRegistry};
+use nizaam_core::capability::{CapabilityDispatchResult, CapabilityError};
 use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
     Participants, PayloadDescriptor, Version,
@@ -27,9 +27,7 @@ use nizaam_core::identity::{
 use nizaam_core::operation::OperationContext;
 use nizaam_core::runtime::{LifecycleState, RequestAdmissionError};
 use nizaam_core::status::Status;
-use nizaam_indexing::{CapabilitySet, IndexingEngine, IndexingRegistration, IndexingRuntime};
-
-fn core_capability_registry(_: &CapabilityRegistry) {}
+use nizaam_indexing::{IndexingEngine, IndexingRegistration, IndexingRuntime};
 
 fn core_shutdown_token(_: &nizaam_core::runtime::CancellationToken) {}
 
@@ -146,23 +144,22 @@ fn universal_request_and_response_use_the_core_contract_boundary() {
 }
 
 #[test]
-fn capability_set_exposes_the_real_core_capability_registry() {
-    let capabilities = CapabilitySet::new();
+fn capability_set_uses_the_core_capability_registry_through_the_engine_boundary() {
+    let engine = test_engine();
 
-    core_capability_registry(capabilities.registry());
-    assert!(capabilities.is_empty());
+    engine.start().unwrap();
+    engine.begin_registration().unwrap();
 
-    let engine_id = engine_id("nizaam.indexing.conformance.capability");
     let capability_id = capability_id("nizaam.indexing.conformance.capability");
-    capabilities
-        .register(
-            capability_definition(&engine_id, &capability_id),
+    engine
+        .register_capability(
+            capability_definition(engine.engine_id(), &capability_id),
             common::echo_handler(),
         )
         .expect("Core capability registry registration should succeed");
 
-    assert!(capabilities.contains(&capability_id));
-    assert_eq!(capabilities.len(), 1);
+    assert!(engine.capabilities().contains(&capability_id));
+    assert_eq!(engine.capabilities().len(), 1);
 }
 
 #[test]
