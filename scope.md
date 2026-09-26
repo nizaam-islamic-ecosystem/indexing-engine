@@ -4083,7 +4083,7 @@ physical storage, or a particular indexing technology.
 
 #### Status
 
-**In Progress**
+**Completed**
 
 ##### Goal
 
@@ -6502,7 +6502,6 @@ partitioning
 sharding
 replication
 physical indexing algorithm
-hash/index generation algorithm
 embedding provider
 embedding model
 similarity algorithm
@@ -6519,6 +6518,47 @@ Phase 2 may establish the metadata required to support these decisions later.
 
 It must not silently freeze the decisions themselves.
 
+#### Implemented in Phase 2
+
+The Phase 2 implementation has established the complete logical data-contract layer described by this section:
+
+```text
+IndexRequirement
+        ↓
+validation / normalization
+        ↓
+IndexDefinition
+        │
+        ├── IndexEntry
+        │       ↓
+        │   ObjectReference
+        │
+        ├── IndexVersion
+        │
+        └── QueryRequest
+                ↓
+            QueryResult
+                ↓
+        ObjectReference
+```
+
+The implemented contracts and boundaries are:
+
+- `ObjectReference` is a validated, generic, source-owned reference. It carries an opaque object reference and does not hydrate, query, or own domain objects.
+- Generic `KeyDefinition` and `KeyMaterial` are implemented with structural validation and deterministic canonical byte representation. Structured material is handled deterministically, including stable map ordering and bounded nesting validation.
+- `IndexEntry` is implemented as a generic logical key-material-to-`ObjectReference` association with validation and no physical-storage semantics.
+- `SimilarityEntry` is implemented as a generic similarity representation plus target reference and optional generic metadata, without embedding-provider, vector-database, or similarity-algorithm ownership.
+- `IndexVersion` is implemented with distinct index-version identity plus optional `SourceVersion`, `SchemaVersion`, and generic metadata. Candidate/active/rebuild/publication workflow remains deferred to Phase 3.
+- `IndexDefinition` is implemented as the canonical logical definition composed from the Phase 1 definition identity, key definition, target-reference type, uniqueness, consistency requirement, source version, schema version, and optional lifecycle metadata. It does not contain physical provider configuration or executable behavior.
+- `IndexRequirement` is implemented as the source-to-Indexing logical contract with validation and normalization into `IndexDefinition`. The requirement and definition remain distinct types.
+- `QueryRequest`, `QueryHit`, and `QueryResult` are implemented as provider-neutral, reference-oriented logical retrieval contracts. Query execution, planning, provider selection, and domain-object hydration remain outside Phase 2.
+- The public `index`, `requirement`, and crate-root module boundaries expose the Phase 2 contracts while preserving the existing Core-backed engine boundary.
+- The logical `IndexId` generation scheme is now frozen and implemented: BLAKE3 extendable-output hashing produces exactly 64 bytes / 512 bits from a deterministic, length-delimited, domain-separated, generation-versioned representation of the namespace, definition identity (definition identifier + index family), and generic key material. Unsupported generation versions are rejected, and deterministic/fixed-vector coverage is present.
+- Phase 1 identity boundaries remain preserved: `IndexId`, `IndexDefinitionId`, namespace, family, source-owned object identity, `ObjectReference`, and version identities remain distinct.
+- Unit tests are present in the corresponding implementation modules, and repository-level identity, index, requirement, integration, and conformance suites cover the Phase 2 contracts and architectural boundaries.
+
+The following decisions remain intentionally deferred after Phase 2: physical index representation, physical storage/provider topology, partitioning, sharding, replication, physical indexing algorithms, embedding provider/model, similarity algorithms, serialization technology, query planning/execution strategy, provider selection policy, rebuild strategy, publication mechanism, and active-version switching mechanism.
+
 ---
 
 #### Completion Criteria
@@ -6527,68 +6567,68 @@ Phase 2 is complete when:
 
 #### Verification Checklist
 
-- [ ] IndexRequirement exists as a genuine source-to-Indexing logical contract.
+- [x] IndexRequirement exists as a genuine source-to-Indexing logical contract.
 
-- [ ] IndexDefinition exists as a genuine canonical logical definition.
+- [x] IndexDefinition exists as a genuine canonical logical definition.
 
-- [ ] IndexRequirement and IndexDefinition remain distinct concepts.
+- [x] IndexRequirement and IndexDefinition remain distinct concepts.
 
-- [ ] Generic key definition / key material is representable.
+- [x] Generic key definition / key material is representable.
 
-- [ ] IndexEntry exists as a generic logical key-to-reference association.
+- [x] IndexEntry exists as a generic logical key-to-reference association.
 
-- [ ] ObjectReference exists as a generic reference to a source-owned object.
+- [x] ObjectReference exists as a generic reference to a source-owned object.
 
-- [ ] ObjectReference does not hydrate or own domain objects.
+- [x] ObjectReference does not hydrate or own domain objects.
 
-- [ ] SimilarityEntry exists as a generic similarity indexing representation.
+- [x] SimilarityEntry exists as a generic similarity indexing representation.
 
-- [ ] Similarity remains separate from relationship semantics.
+- [x] Similarity remains separate from relationship semantics.
 
-- [ ] IndexVersion exists and remains distinct from source, schema, and Core
+- [x] IndexVersion exists and remains distinct from source, schema, and Core
   contract versions.
 
-- [ ] QueryRequest exists as a provider-neutral logical retrieval contract.
+- [x] QueryRequest exists as a provider-neutral logical retrieval contract.
 
-- [ ] QueryResult exists as a generic reference-oriented result contract.
+- [x] QueryResult exists as a generic reference-oriented result contract.
 
-- [ ] QueryResult does not own or hydrate domain objects.
+- [x] QueryResult does not own or hydrate domain objects.
 
-- [ ] IndexDefinition composes correctly with Phase 1 identity types.
+- [x] IndexDefinition composes correctly with Phase 1 identity types.
 
-- [ ] Namespace and family remain separate from physical implementation.
+- [x] Namespace and family remain separate from physical implementation.
 
-- [ ] Relationship indexing does not introduce semantic predicate ownership.
+- [x] Relationship indexing does not introduce semantic predicate ownership.
 
-- [ ] Source-owned categories remain outside Indexing domain models.
+- [x] Source-owned categories remain outside Indexing domain models.
 
-- [ ] Requirement validation rejects invalid logical contracts.
+- [x] Requirement validation rejects invalid logical contracts.
 
-- [ ] Requirement normalization can produce a valid logical definition.
+- [x] Requirement normalization can produce a valid logical definition.
 
-- [ ] Physical provider configuration cannot leak into the logical contracts.
+- [x] Physical provider configuration cannot leak into the logical contracts.
 
-- [ ] Query execution is not implemented as part of Phase 2.
+- [x] Query execution is not implemented as part of Phase 2.
 
-- [ ] Index construction is not implemented as part of Phase 2.
+- [x] Index construction is not implemented as part of Phase 2.
 
-- [ ] Rebuild and publication are not implemented as part of Phase 2.
+- [x] Rebuild and publication are not implemented as part of Phase 2.
 
-- [ ] Storage and persistence are not implemented as part of Phase 2.
+- [x] Storage and persistence are not implemented as part of Phase 2.
 
-- [ ] Domain-object hydration is not implemented as part of Phase 2.
+- [x] Domain-object hydration is not implemented as part of Phase 2.
 
-- [ ] Core runtime mechanisms are reused rather than reimplemented.
+- [x] Core runtime mechanisms are reused rather than reimplemented.
 
-- [ ] Unit tests cover the Phase 2 implementation behavior.
+- [x] Unit tests cover the Phase 2 implementation behavior.
 
-- [ ] Integration tests cover public cross-module composition.
+- [x] Integration tests cover public cross-module composition.
 
-- [ ] Negative conformance tests protect the architectural boundaries.
+- [x] Negative conformance tests protect the architectural boundaries.
 
-- [ ] Previously verified Phase 1 behavior remains intact.
+- [x] Previously verified Phase 1 behavior remains intact.
 
-- [ ] No physical indexing technology has leaked into the logical contracts.
+- [x] No physical indexing technology has leaked into the logical contracts.
 
 Completion does not mean that the Indexing Engine can yet build or query a real
 physical index.
@@ -6727,7 +6767,7 @@ semantic model.
 
 #### Status
 
-**Not Started**
+**In Progress**
 
 ##### 1. What Phase 3 actually is
 
