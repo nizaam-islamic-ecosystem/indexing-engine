@@ -11629,6 +11629,50 @@ That gives the Indexing Engine a clean generic retrieval layer that can serve mu
 
 **Not Started**
 
+#### Approved Cross-Phase Architecture Update
+
+This Phase 5 section incorporates the explicit architectural decision made after the original scope was written:
+
+```text
+nizaam-indexing = library crate only
+
+No standalone Indexing binary is required.
+
+Source / infrastructure engines
+        ↓
+Indexing communication contract
+        ↓
+Indexing library / hosted Indexing instance
+```
+
+The Indexing Engine does not need an executable entry point to own its indexing responsibilities. Its indexing work is initiated by another Nizaam engine through the established Core communication boundary. The final hosting/deployment arrangement for a library-only Indexing instance is intentionally not frozen here.
+
+The event communication model introduced by this decision is:
+
+```text
+Source Engine
+      ↓
+UniversalRequest
+      ↓
+IndexEvent contract/content
+      ↓
+Indexing Engine
+      ↓
+index assignment / indexing operation
+      ↓
+IndexEventResponse contract/content
+      ↓
+UniversalResponse
+      ↓
+Source Engine
+```
+
+`IndexEvent` is an Indexing-owned typed contract built on Core `UniversalEvent`; it is not a second event transport, event bus, or runtime. `UniversalRequest` and `UniversalResponse` remain the protocol-level Request/Response interactions.
+
+For this event path, **index assignment means producing an `IndexId`**. The term `index` in the event/result contract therefore refers to `IndexId`, not to a physical storage structure.
+
+---
+
 ##### 1. Purpose
 
 Phase 5 makes the Indexing Engine operationally safe under:
@@ -12677,7 +12721,253 @@ Indexing should consume that mechanism rather than implement an independent conf
 
 ---
 
-#### 28. Health and Readiness
+#### 28. IndexEvent Communication
+
+Phase 5 owns the operationally safe cross-engine indexing event contract because the Indexing Engine must now be callable on demand by source engines without introducing a standalone Indexing executable.
+
+The communication boundary is:
+
+```text
+Source / Infrastructure Engine
+        ↓
+Core UniversalRequest
+        ↓
+IndexEvent
+        ↓
+Indexing capability
+        ↓
+assign / maintain index
+        ↓
+Core UniversalResponse
+        ↓
+IndexEventResponse
+        ↓
+Source Engine
+```
+
+The Core contract already defines `UniversalRequest` and `UniversalResponse` as wrappers around the common universal occurrence boundary. `UniversalRequest` constructs the request occurrence internally, and `UniversalResponse` constructs the response occurrence internally.
+
+The IndexEvent layer must therefore add only Indexing semantics on top of Core; it must not recreate request/response, message identity, operation context, engine identity, engine-instance identity, or transport infrastructure. The exact physical/wire nesting of IndexEvent content inside a UniversalRequest remains deliberately unfrozen; the architectural contract is that UniversalRequest is the request interaction and IndexEvent is the typed Indexing request content.
+
+---
+
+#### 29. `IndexEvent`
+
+`src/event/index_event.rs` owns the source-to-Indexing logical indexing event.
+
+The conceptual structure is:
+
+```text
+IndexEvent (typed Indexing request contract)
+├── Core UniversalEvent occurrence boundary
+├── Indexing requirement / definition information
+├── source-owned indexable record data
+└── indexing operation/context data owned by Indexing
+```
+
+`IndexEvent` is logically built on the Core `UniversalEvent` contract, but this does not require a recursively nested `UniversalEvent` object in the transport representation. The protocol-level carrier remains `UniversalRequest`; serialization/wire representation is not frozen in Phase 5.
+
+`UniversalEvent` remains the common occurrence boundary. Core separates the universal `EventId` from the envelope's `MessageId`, while the envelope carries the operation/correlation context and participants.
+
+`IndexEvent` must expose access to the source engine identity and source instance identity through the underlying Core participant metadata rather than duplicating those identities into a second Indexing-specific identity field. Core participant metadata supports both logical engine identities and optional concrete engine-instance identities.
+
+Conceptually, the event must make available:
+
+```text
+source EngineId
+source EngineInstanceId, when present
+OperationId / CorrelationId through Core context
+index requirement / logical index contract
+object/reference information
+key material required for index assignment
+source-owned indexable payload
+source-owned word / semantic / context data
+```
+
+The last group remains source-owned data. Indexing may inspect only the information required by the applicable IndexDefinition and indexing contract; it must not become the owner of Quran, Arabic, Hadith, KG, Fiqh, Tafsir, Aqeedah, Seerah, or other domain semantics.
+
+##### 29.1 Transport vs domain context
+
+Two kinds of context must remain distinct:
+
+```text
+Core execution context
+    → OperationContext / EngineContext / cancellation / deadline
+
+Source/domain context
+    → carried as IndexEvent content and interpreted only by its owner
+```
+
+`IndexEvent` must not create `IndexingContext`, `IndexingCancellationToken`, or `IndexingDeadline` as substitutes for Core mechanisms.
+
+##### 29.2 IndexEvent construction
+
+Construction must require the event's logical Indexing data and build the universal event boundary through Core. The exact serialization encoding, transport implementation, and provider remain deferred.
+
+The implementation must validate at the event boundary that:
+
+```text
+interaction is compatible with the surrounding UniversalRequest path
+event metadata is non-empty and structurally valid
+source identity information is internally consistent
+required IndexRequirement / definition information is present
+required object/reference and key information is present
+source payload remains opaque where Indexing has no ownership
+```
+
+The event contract must not directly contain physical-provider instructions. It must not accept requests such as:
+
+```text
+B-tree
+HNSW
+FAISS
+Lucene
+PostgreSQL GIN
+specific database table
+specific storage partition
+```
+
+Those remain outside the logical event boundary.
+
+---
+
+#### 30. `IndexEventResponse`
+
+`src/event/index_event_response.rs` owns the Indexing-specific response to a source engine.
+
+The protocol boundary remains:
+
+```text
+UniversalResponse
+      ↓
+IndexEventResponse contract/content
+```
+
+`IndexEventResponse` is therefore not another interaction type. The actual transport-level interaction remains `Interaction::Response`, and Core `UniversalResponse` remains authoritative for the universal response envelope and response status.
+
+The conceptual result is:
+
+```text
+IndexEventResponse (typed Indexing response contract)
+├── Core UniversalResponse response boundary
+├── assigned IndexId, when indexing succeeded
+├── index/version metadata required by the caller
+└── Indexing-owned technical result information
+```
+
+As with `IndexEvent`, the exact wire nesting is deliberately not frozen; the transport-level response remains `UniversalResponse` carrying the Indexing-specific response content.
+
+The primary success result is the assigned **`IndexId`**. The response may additionally return logical version/consistency metadata required by the established Phase 3/Phase 4 contracts, but it must not return physical storage identifiers or domain objects.
+
+For failure, the response must preserve the established Core technical status/error boundary and expose Indexing-owned failure information only where that information belongs to Indexing. Failure classification must remain separate from retry policy.
+
+The response must preserve the request's operation/correlation relationship through the established Core response construction path. It must not create a parallel response identity, correlation mechanism, or retry system.
+
+---
+
+#### 31. IndexEvent File Responsibilities
+
+The file responsibilities are:
+
+### `src/event/mod.rs`
+
+Owns module assembly and the public IndexEvent surface. It should:
+
+```text
+export IndexEvent
+export IndexEventResponse
+provide module-level interaction tests
+```
+
+It must not become a second transport layer or global event registry.
+
+### `src/event/index_event.rs`
+
+Owns:
+
+```text
+IndexEvent data model
+construction / validation
+Core UniversalEvent composition
+source identity accessors
+source payload boundary
+Indexing requirement accessors
+```
+
+It must not own:
+
+```text
+engine lifecycle
+network transport
+provider selection
+physical storage
+domain semantics
+retry scheduling
+global routing
+```
+
+### `src/event/index_event_response.rs`
+
+Owns:
+
+```text
+IndexEventResponse data model
+response construction / validation
+assigned IndexId exposure
+logical version/result exposure
+Core UniversalResponse composition
+```
+
+It must not create a second status, response, or transport protocol.
+
+---
+
+#### 32. IndexEvent Processing Boundary
+
+The complete event-driven indexing flow is:
+
+```text
+Source Engine
+      │
+      │ source-owned word / semantic / context / record
+      ▼
+IndexEvent contract/content
+      │
+      ▼
+UniversalRequest
+      │
+      ▼
+Core runtime / lifecycle admission / capability dispatch
+      │
+      ▼
+Indexing capability
+      │
+      ▼
+Phase 3 construction/update path
+      │
+      ▼
+assign / maintain IndexId
+      │
+      ▼
+Phase 5 operational checks
+      │
+      ▼
+IndexEventResponse contract/content
+      │
+      ▼
+UniversalResponse
+      │
+      ▼
+Source Engine
+```
+
+IndexEvent processing must reuse Phase 3 construction/update and Phase 4 consistency/retrieval contracts rather than introducing event-specific indexing algorithms.
+
+The response is a **reply to the indexing request**, not a second asynchronous event stream. Any later event publication or subscriber mechanism remains a Core-owned event-infrastructure concern unless a later approved architecture changes that boundary.
+
+---
+
+#### 33. Health and Readiness
 
 Phase 5 includes:
 
@@ -12719,7 +13009,7 @@ The appropriate Core health/observability mechanisms should carry those observat
 
 ---
 
-#### 29. Core Readiness vs Index Availability
+#### 34. Core Readiness vs Index Availability
 
 These concepts must remain distinct.
 
@@ -12757,7 +13047,7 @@ The exact policy for when an individual index condition changes overall engine r
 
 ---
 
-#### 30. Phase 4 Interaction
+#### 35. Phase 4 Interaction
 
 Phase 4 established:
 
@@ -12807,7 +13097,7 @@ Any recovery/synchronization decision remains a separate operational workflow.
 
 ---
 
-#### 31. Phase 3 Interaction
+#### 36. Phase 3 Interaction
 
 Phase 3 established:
 
@@ -12869,7 +13159,7 @@ The resulting relationship is:
 
 ---
 
-#### 32. Provider Boundary
+#### 37. Provider Boundary
 
 Phase 5 preserves the provider abstraction.
 
@@ -12899,7 +13189,7 @@ Those remain behind the provider boundary.
 
 ---
 
-#### 33. Planned Test Structure
+#### 38. Planned Test Structure
 
 Phase 5 plans:
 
@@ -12910,6 +13200,7 @@ tests/
 ├── integrity.rs
 ├── recovery.rs
 ├── configuration.rs
+├── event.rs
 ├── fault_injection.rs
 ├── stress.rs
 ├── integration.rs
@@ -12942,7 +13233,7 @@ retry policy is not silently embedded in failure classification
 
 ---
 
-#### 34. `tests/lifecycle.rs`
+#### 39. `tests/lifecycle.rs`
 
 Verify:
 
@@ -12975,7 +13266,7 @@ unless an explicit architecture policy requires it.
 
 ---
 
-#### 35. `tests/capacity.rs`
+#### 40. `tests/capacity.rs`
 
 Verify:
 
@@ -13007,7 +13298,7 @@ does not silently create unbounded query degradation
 
 ---
 
-#### 36. `tests/integrity.rs`
+#### 41. `tests/integrity.rs`
 
 Verify:
 
@@ -13030,7 +13321,7 @@ cannot become active
 
 ---
 
-#### 37. `tests/recovery.rs`
+#### 42. `tests/recovery.rs`
 
 Verify deterministic recovery for:
 
@@ -13053,7 +13344,42 @@ and that a known-good active version remains protected during recovery.
 
 ---
 
-#### 38. Fault Injection
+#### 43. `tests/event.rs`
+
+Verify the cross-engine IndexEvent contract:
+
+```text
+IndexEvent construction
+UniversalEvent composition
+source EngineId propagation
+source EngineInstanceId propagation
+OperationId / CorrelationId preservation
+source-owned payload preservation
+Indexing requirement preservation
+IndexId assignment in the response
+IndexEventResponse composition
+UniversalResponse semantics
+request/response interaction distinction
+invalid event rejection
+missing source identity handling
+physical-provider detail rejection
+domain-semantic non-ownership
+```
+
+Important negative tests:
+
+```text
+IndexEvent must not create a second transport protocol.
+IndexEvent must not create a second event bus.
+IndexEvent must not duplicate Core execution context.
+IndexEvent must not embed physical provider instructions.
+IndexEventResponse must remain a UniversalResponse-level reply.
+A response must not be misclassified as an Event interaction.
+```
+
+---
+
+#### 44. Fault Injection
 
 `fault_injection.rs` should inject deterministic failures at boundaries such as:
 
@@ -13080,7 +13406,7 @@ Fault injection should reuse real Core APIs and replace only external/test-contr
 
 ---
 
-#### 39. Stress Testing
+#### 45. Stress Testing
 
 `stress.rs` should test bounded behavior under combinations such as:
 
@@ -13107,7 +13433,7 @@ recovery remains deterministic
 
 ---
 
-#### 40. Configuration Tests
+#### 46. Configuration Tests
 
 Configuration tests should verify:
 
@@ -13123,7 +13449,7 @@ They should not silently establish physical implementation choices that remain o
 
 ---
 
-#### 41. Integration Testing
+#### 47. Integration Testing
 
 The Phase 5 integration path should resemble:
 
@@ -13155,7 +13481,7 @@ This proves Phase 5 is integrated with the existing Indexing Engine rather than 
 
 ---
 
-#### 42. Conformance Testing
+#### 48. Conformance Testing
 
 Conformance tests should protect the architecture from drift.
 
@@ -13186,7 +13512,7 @@ integrity, or recovery logic.
 
 ---
 
-#### 43. What Phase 5 Must Not Implement
+#### 49. What Phase 5 Must Not Implement
 
 Phase 5 must not become:
 
@@ -13240,7 +13566,7 @@ Domain semantic recovery engine
 
 ---
 
-#### 44. Phase 5 Core Invariants
+#### 50. Phase 5 Core Invariants
 
 The following invariants should be treated as implementation requirements:
 
@@ -13293,11 +13619,29 @@ The following invariants should be treated as implementation requirements:
 
 - [ ] Physical provider details remain behind the provider boundary.
 
+- [ ] Indexing is library-only; no standalone Indexing binary is required.
+
+- [ ] IndexEvent uses Core `UniversalEvent` rather than creating a parallel event transport.
+
+- [ ] UniversalRequest remains the inbound request interaction.
+
+- [ ] UniversalResponse remains the outbound response interaction.
+
+- [ ] Source EngineId / EngineInstanceId are taken from the Core participant boundary rather than duplicated unnecessarily.
+
+- [ ] Core OperationId / CorrelationId / EngineContext remain the authoritative execution-context boundary.
+
+- [ ] Source-owned word / semantic / context data remains source-owned payload content.
+
+- [ ] Successful IndexEvent processing returns an `IndexId` rather than a physical storage identifier.
+
+- [ ] IndexEvent communication does not create a second event bus, scheduler, transport, or retry framework.
+
 - [ ] Phase 1–4 behavior remains intact.
 
 ---
 
-#### Completion Criteria
+#### 51. Completion Criteria
 
 Phase 5 is complete when the Indexing Engine has:
 
@@ -13341,6 +13685,22 @@ Phase 5 is complete when the Indexing Engine has:
 
 - [ ] validated configuration updates
 
+- [ ] IndexEvent contract implemented on Core UniversalEvent
+
+- [ ] UniversalRequest / UniversalResponse used for IndexEvent request/response communication
+
+- [ ] source EngineId / EngineInstanceId propagation verified
+
+- [ ] Core operation/correlation context preserved through IndexEvent processing
+
+- [ ] successful IndexEvent response exposes assigned `IndexId`
+
+- [ ] source-owned semantic payload remains outside Indexing ownership
+
+- [ ] no standalone Indexing binary introduced
+
+- [ ] no secondary event transport or event bus introduced
+
 - [ ] appropriate health/readiness reporting
 
 - [ ] no health-owned lifecycle
@@ -13363,7 +13723,41 @@ The fundamental completion condition is:
 
 ---
 
-#### 46. Final Mental Model
+#### 52. Final Mental Model
+
+The Phase 5 operational model now includes on-demand cross-engine indexing communication:
+
+```text
+Source Engine
+      │
+      ▼
+IndexEvent contract/content
+      │
+      ▼
+UniversalRequest
+      │
+      ▼
+Indexing capability
+      │
+      ├── Lifecycle
+      ├── Capacity
+      ├── Integrity
+      └── Failure / Recovery
+      │
+      ▼
+Assign / maintain IndexId
+      │
+      ▼
+IndexEventResponse contract/content
+      │
+      ▼
+UniversalResponse
+      │
+      ▼
+Source Engine
+```
+
+`IndexEvent` is the typed Indexing contract; Core remains the owner of universal event/request/response infrastructure.
 
 ```text
                          CORE
@@ -13426,7 +13820,29 @@ Phase 6
 
 ##### Final Phase 5 Principle
 
-> **Phase 3 made valid index versions exist. Phase 4 made those versions usable for generic retrieval. Phase 5 makes the Indexing Engine capable of operating safely when resources are constrained, indexes become stale or invalid, providers fail, configuration changes, or recovery is required, without allowing invalid state to become active or silently duplicating responsibilities already owned by Nizaam Core.**
+> **Phase 3 made valid index versions exist. Phase 4 made those versions usable for generic retrieval. Phase 5 makes the Indexing Engine capable of operating safely when resources are constrained, indexes become stale or invalid, providers fail, configuration changes, or recovery is required, while allowing source engines to request indexing through a Core-based `IndexEvent` contract and receive an `IndexId` through a `UniversalResponse`, without allowing invalid state to become active or silently duplicating responsibilities already owned by Nizaam Core.**
+
+---
+
+---
+
+#### Cross-Phase Supersession Note
+
+The original Phase 0 executable decision and the original Phase 6 event wording are superseded by the approved architecture update captured at the beginning of this Phase 5 section:
+
+```text
+Indexing = library-only
+
+IndexEvent = Indexing-owned typed contract built on Core UniversalEvent
+
+UniversalRequest = inbound request interaction
+UniversalResponse = outbound response interaction
+
+No standalone Indexing binary
+No secondary event transport / event bus
+```
+
+The remaining Phase 6 observability/event-infrastructure work must be interpreted consistently with this boundary: Core remains the owner of universal event infrastructure, while Indexing owns the `IndexEvent` semantic contract used for indexing requests and results.
 
 ---
 
