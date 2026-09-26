@@ -74,7 +74,8 @@ mod tests {
         assert_eq!(IndexId::generation_version(), version);
 
         let generated =
-            IndexId::generate(&namespace, &definition, &key).expect("generation should succeed");
+            IndexId::generate(&namespace, &definition, IndexFamily::Inverted, &key)
+            .expect("generation should succeed");
 
         assert_eq!(generated.as_bytes().len(), INDEX_ID_BYTE_LEN);
     }

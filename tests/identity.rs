@@ -51,9 +51,10 @@ fn schema_version(value: &str) -> SchemaVersion {
 fn generated_index_id(
     namespace: &IndexNamespace,
     definition: &IndexDefinitionId,
+    family: IndexFamily,
     key_material: &KeyMaterial,
 ) -> IndexId {
-    IndexId::generate(namespace, definition, key_material)
+    IndexId::generate(namespace, definition, family, key_material)
         .expect("test key material must produce a valid index ID")
 }
 
@@ -106,8 +107,8 @@ fn generated_index_id_is_deterministic_for_identical_logical_input() {
     let definition = definition_id("verse-term");
     let key = KeyMaterial::text("lemma");
 
-    let first = generated_index_id(&namespace, &definition, &key);
-    let second = generated_index_id(&namespace, &definition, &key);
+    let first = generated_index_id(&namespace, &definition, IndexFamily::Inverted, &key);
+    let second = generated_index_id(&namespace, &definition, IndexFamily::Inverted, &key);
 
     assert_eq!(first, second);
     assert_eq!(first.as_bytes().len(), 64);
@@ -122,10 +123,10 @@ fn generated_index_id_changes_when_namespace_definition_or_key_material_changes(
     let key = KeyMaterial::text("lemma");
     let alternate_key = KeyMaterial::text("root");
 
-    let base = generated_index_id(&name_space, &definition, &key);
-    let namespace_changed = generated_index_id(&alternate_namespace, &definition, &key);
-    let definition_changed = generated_index_id(&name_space, &alternate_definition, &key);
-    let key_changed = generated_index_id(&name_space, &definition, &alternate_key);
+    let base = generated_index_id(&name_space, &definition, IndexFamily::Inverted, &key);
+    let namespace_changed = generated_index_id(&alternate_namespace, &definition, IndexFamily::Inverted, &key);
+    let definition_changed = generated_index_id(&name_space, &alternate_definition, IndexFamily::Inverted, &key);
+    let key_changed = generated_index_id(&name_space, &definition, IndexFamily::Inverted, &alternate_key);
 
     assert_ne!(base, namespace_changed);
     assert_ne!(base, definition_changed);
@@ -150,8 +151,8 @@ fn equivalent_map_key_material_uses_one_canonical_index_id() {
 
     assert_eq!(first.canonical_bytes(), second.canonical_bytes());
     assert_eq!(
-        generated_index_id(&namespace, &definition, &first),
-        generated_index_id(&namespace, &definition, &second)
+        generated_index_id(&namespace, &definition, IndexFamily::Inverted, &first),
+        generated_index_id(&namespace, &definition, IndexFamily::Inverted, &second)
     );
 }
 

@@ -134,9 +134,10 @@ fn phase2_index_id(byte: u8) -> IndexId {
 fn phase2_generated_index_id(
     namespace: &IndexNamespace,
     definition: &IndexDefinitionId,
+    family: IndexFamily,
     key_material: &KeyMaterial,
 ) -> IndexId {
-    IndexId::generate(namespace, definition, key_material)
+    IndexId::generate(namespace, definition, family, key_material)
         .expect("test key material must produce a valid index ID")
 }
 
@@ -400,9 +401,19 @@ fn phase2_requirement_to_definition_to_entry_to_reference_composes_end_to_end() 
 
     let key = KeyMaterial::text("bismillah");
     let index_id =
-        phase2_generated_index_id(definition.namespace(), definition.definition_id(), &key);
+        phase2_generated_index_id(
+            definition.namespace(),
+            definition.definition_id(),
+            definition.family(),
+            &key,
+        );
     let repeated_index_id =
-        phase2_generated_index_id(definition.namespace(), definition.definition_id(), &key);
+        phase2_generated_index_id(
+            definition.namespace(),
+            definition.definition_id(),
+            definition.family(),
+            &key,
+        );
     assert_eq!(index_id, repeated_index_id);
     assert_eq!(index_id.as_bytes().len(), 64);
 
@@ -444,6 +455,7 @@ fn phase2_definition_version_query_and_result_compose_end_to_end() {
     let index_id = phase2_generated_index_id(
         definition.namespace(),
         definition.definition_id(),
+        definition.family(),
         &query_key,
     );
     let request = QueryRequest::with_options(

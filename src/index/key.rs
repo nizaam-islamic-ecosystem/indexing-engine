@@ -145,6 +145,13 @@ impl KeyField {
     }
 }
 
+/// Maximum nesting depth accepted by key-material validation.
+///
+/// The limit protects validation from unbounded caller-controlled recursive
+/// structures. Canonical encoding is iterative and therefore does not depend
+/// on the process stack for traversal.
+pub const KEY_MATERIAL_MAX_DEPTH: usize = 64;
+
 /// Generic logical key material.
 ///
 /// This is deliberately a small, deterministic value model. It allows
@@ -226,75 +233,113 @@ impl KeyMaterial {
     }
 
     /// Validates the complete key-material tree.
+    ///
+    /// Validation uses an explicit work stack rather than recursive calls so a
+    /// caller-controlled nested structure cannot exhaust the process stack.
+    /// Structures deeper than [`KEY_MATERIAL_MAX_DEPTH`] are rejected.
     pub fn validate(&self) -> Result<(), KeyMaterialValidationError> {
-        match self {
-            Self::Null | Self::Bool(_) | Self::Integer(_) | Self::Unsigned(_) => Ok(()),
+        let mut work = vec![(self, 0_usize)];
 
-            Self::Text(value) => validate_text(value),
+        while let Some((value, depth)) = work.pop() {
+            match value {
+                Self::Null | Self::Bool(_) | Self::Integer(_) | Self::Unsigned(_) => {}
 
-            Self::Bytes(_) => Ok(()),
+                Self::Text(text) => validate_text(text)?,
 
-            Self::Sequence(values) => {
-                for value in values {
-                    value.validate()?;
+                Self::Bytes(_) => {}
+
+                Self::Sequence(values) => {
+                    let child_depth = depth.checked_add(1).ok_or(
+                        KeyMaterialValidationError::DepthLimitExceeded { depth: usize::MAX },
+                    )?;
+                    if child_depth > KEY_MATERIAL_MAX_DEPTH {
+                        return Err(KeyMaterialValidationError::DepthLimitExceeded {
+                            depth: child_depth,
+                        });
+                    }
+
+                    for child in values.iter().rev() {
+                        work.push((child, child_depth));
+                    }
                 }
-                Ok(())
-            }
 
-            Self::Map(fields) => {
-                for (name, value) in fields {
-                    validate_material_field_name(name)?;
-                    value.validate()?;
+                Self::Map(fields) => {
+                    let child_depth = depth.checked_add(1).ok_or(
+                        KeyMaterialValidationError::DepthLimitExceeded { depth: usize::MAX },
+                    )?;
+                    if child_depth > KEY_MATERIAL_MAX_DEPTH {
+                        return Err(KeyMaterialValidationError::DepthLimitExceeded {
+                            depth: child_depth,
+                        });
+                    }
+
+                    for (name, child) in fields.iter().rev() {
+                        validate_material_field_name(name)?;
+                        work.push((child, child_depth));
+                    }
                 }
-                Ok(())
             }
         }
+
+        Ok(())
     }
 
     fn encode_canonical(&self, output: &mut Vec<u8>) {
-        match self {
-            Self::Null => output.push(0x00),
+        enum WorkItem<'a> {
+            Value(&'a KeyMaterial),
+            Text(&'a str),
+        }
 
-            Self::Bool(false) => output.push(0x01),
-            Self::Bool(true) => output.push(0x02),
+        let mut work = vec![WorkItem::Value(self)];
 
-            Self::Integer(value) => {
-                output.push(0x03);
-                output.extend_from_slice(&value.to_be_bytes());
-            }
+        while let Some(item) = work.pop() {
+            match item {
+                WorkItem::Text(value) => encode_text(value, output),
+                WorkItem::Value(value) => match value {
+                    Self::Null => output.push(0x00),
 
-            Self::Unsigned(value) => {
-                output.push(0x04);
-                output.extend_from_slice(&value.to_be_bytes());
-            }
+                    Self::Bool(false) => output.push(0x01),
+                    Self::Bool(true) => output.push(0x02),
 
-            Self::Text(value) => {
-                output.push(0x05);
-                encode_text(value, output);
-            }
+                    Self::Integer(value) => {
+                        output.push(0x03);
+                        output.extend_from_slice(&value.to_be_bytes());
+                    }
 
-            Self::Bytes(value) => {
-                output.push(0x06);
-                encode_bytes(value, output);
-            }
+                    Self::Unsigned(value) => {
+                        output.push(0x04);
+                        output.extend_from_slice(&value.to_be_bytes());
+                    }
 
-            Self::Sequence(values) => {
-                output.push(0x07);
-                encode_u64(values.len() as u64, output);
+                    Self::Text(value) => {
+                        output.push(0x05);
+                        encode_text(value, output);
+                    }
 
-                for value in values {
-                    value.encode_canonical(output);
-                }
-            }
+                    Self::Bytes(value) => {
+                        output.push(0x06);
+                        encode_bytes(value, output);
+                    }
 
-            Self::Map(fields) => {
-                output.push(0x08);
-                encode_u64(fields.len() as u64, output);
+                    Self::Sequence(values) => {
+                        output.push(0x07);
+                        encode_u64(values.len() as u64, output);
 
-                for (name, value) in fields {
-                    encode_text(name, output);
-                    value.encode_canonical(output);
-                }
+                        for value in values.iter().rev() {
+                            work.push(WorkItem::Value(value));
+                        }
+                    }
+
+                    Self::Map(fields) => {
+                        output.push(0x08);
+                        encode_u64(fields.len() as u64, output);
+
+                        for (name, value) in fields.iter().rev() {
+                            work.push(WorkItem::Value(value));
+                            work.push(WorkItem::Text(name));
+                        }
+                    }
+                },
             }
         }
     }
@@ -351,6 +396,9 @@ pub enum KeyMaterialValidationError {
 
     /// Text contains a control character.
     TextControlCharacter { index: usize },
+
+    /// The nested key-material structure exceeds the supported depth.
+    DepthLimitExceeded { depth: usize },
 }
 
 impl fmt::Display for KeyMaterialValidationError {
@@ -372,6 +420,10 @@ impl fmt::Display for KeyMaterialValidationError {
             Self::TextControlCharacter { index } => write!(
                 formatter,
                 "key-material text contains a control character at byte index {index}"
+            ),
+            Self::DepthLimitExceeded { depth } => write!(
+                formatter,
+                "key-material nesting depth {depth} exceeds the maximum of {KEY_MATERIAL_MAX_DEPTH}"
             ),
         }
     }
@@ -643,5 +695,35 @@ mod tests {
             error,
             KeyMaterialValidationError::TextControlCharacter { index: 3 }
         );
+    }
+
+    #[test]
+    fn key_material_validation_rejects_excessive_nesting_without_recursive_calls() {
+        let mut material = KeyMaterial::Null;
+
+        for _ in 0..=KEY_MATERIAL_MAX_DEPTH {
+            material = KeyMaterial::Sequence(vec![material]);
+        }
+
+        let error = material
+            .validate()
+            .expect_err("excessive nesting must be rejected");
+
+        assert!(matches!(
+            error,
+            KeyMaterialValidationError::DepthLimitExceeded { depth }
+                if depth == KEY_MATERIAL_MAX_DEPTH + 1
+        ));
+    }
+
+    #[test]
+    fn deeply_nested_canonical_encoding_is_stack_safe() {
+        let mut material = KeyMaterial::Null;
+
+        for _ in 0..(KEY_MATERIAL_MAX_DEPTH + 32) {
+            material = KeyMaterial::Sequence(vec![material]);
+        }
+
+        assert!(!material.canonical_bytes().is_empty());
     }
 }
