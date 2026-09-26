@@ -1,20 +1,27 @@
-//! Stable logical identity for a concrete Indexing index.
+//! Stable logical identity and deterministic generation for a concrete Indexing index.
 //!
-//! Phase 1 establishes the binary width and identity semantics of `IndexId`.
-//! The 512-bit value is intentionally treated as opaque bytes. This module
-//! does not select or implement the algorithm that generates those bytes.
+//! Phase 2 freezes the logical `IndexId` generation scheme while preserving the
+//! Phase 1 opaque identity representation. `IndexId` remains exactly 64 bytes;
+//! generation is deterministic and based on a versioned, domain-separated
+//! canonical representation of:
 //!
-//! The distinction is important:
+//! - the logical index namespace,
+//! - the logical index definition identifier, and
+//! - generic key material.
 //!
-//! - `IndexId` owns the identity value.
-//! - Any future generation/hash mechanism produces that value.
-//! - Rust's `Hash` implementation only makes `IndexId` usable in hashed
-//!   collections; it is not the index-generation algorithm.
-//!
-//! The scope fixes the identity width at 512 bits / 64 bytes while deferring
-//! the generation algorithm and human-readable encoding to a later phase.
+//! The resulting bytes are produced with standard BLAKE3 extendable-output
+//! hashing to exactly 64 bytes. This is an Indexing identity-generation
+//! mechanism; it is not a general-purpose serialization format and it does
+//! not assign semantic meaning to the source-owned key material.
 
 use core::fmt;
+use std::error::Error;
+
+use blake3::Hasher;
+
+use crate::identity::definition::IndexDefinitionId;
+use crate::identity::namespace::IndexNamespace;
+use crate::index::{IndexFamily, KeyMaterial, KeyMaterialValidationError};
 
 /// Fixed width of an [`IndexId`] in bytes.
 pub const INDEX_ID_BYTE_LEN: usize = 64;
@@ -22,14 +29,96 @@ pub const INDEX_ID_BYTE_LEN: usize = 64;
 /// Fixed width of an [`IndexId`] in bits.
 pub const INDEX_ID_BIT_LEN: usize = INDEX_ID_BYTE_LEN * 8;
 
+/// Domain-separation context for logical Indexing identity generation.
+///
+/// The domain is intentionally explicit so that IndexId generation does not
+/// share an unqualified hash namespace with unrelated Nizaam systems.
+const INDEX_ID_GENERATION_DOMAIN: &[u8] = b"NIZAAM / INDEX-ID / ";
+
+/// Version of the frozen Phase 2 IndexId generation scheme.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IndexIdGenerationVersion(u32);
+
+impl IndexIdGenerationVersion {
+    /// The currently defined IndexId generation scheme.
+    pub const CURRENT: Self = Self(1);
+
+    /// Creates an explicit generation-scheme version.
+    ///
+    /// Version values are opaque scheme identifiers. The current Phase 2
+    /// contract uses [`Self::CURRENT`].
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric generation-scheme version.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for IndexIdGenerationVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Failures that can occur while generating an [`IndexId`].
+#[derive(Debug, Eq, PartialEq)]
+pub enum IndexIdGenerationError {
+    /// The supplied key material violates its logical validation contract.
+    InvalidKeyMaterial(KeyMaterialValidationError),
+
+    /// The requested generation-scheme version is not supported.
+    UnsupportedVersion {
+        requested: IndexIdGenerationVersion,
+        supported: IndexIdGenerationVersion,
+    },
+}
+
+impl fmt::Display for IndexIdGenerationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidKeyMaterial(error) => {
+                write!(
+                    formatter,
+                    "invalid key material for IndexId generation: {error}"
+                )
+            }
+            Self::UnsupportedVersion { requested, supported } => write!(
+                formatter,
+                "unsupported IndexId generation version {requested}; supported version is {supported}"
+            ),
+        }
+    }
+}
+
+impl Error for IndexIdGenerationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidKeyMaterial(error) => Some(error),
+            Self::UnsupportedVersion { .. } => None,
+        }
+    }
+}
+
+impl From<KeyMaterialValidationError> for IndexIdGenerationError {
+    fn from(error: KeyMaterialValidationError) -> Self {
+        Self::InvalidKeyMaterial(error)
+    }
+}
+
 /// Stable identity of one concrete logical Indexing index.
 ///
-/// The underlying value is exactly 64 bytes (512 bits). The bytes have no
-/// Indexing-defined semantic structure in Phase 1. In particular, this type
-/// does not know whether the value came from SHA-512, BLAKE3, or another
-/// future-approved generation mechanism.
+/// The underlying value is exactly 64 bytes (512 bits). The value is opaque:
+/// callers can compare, store, and transport it, but the type does not expose
+/// any semantic interpretation of the generated bytes.
 ///
-/// Human-readable encoding is intentionally not part of this phase.
+/// `from_bytes` remains available as the low-level constructor for established
+/// binary identity values and for Phase 1 compatibility. New deterministic
+/// logical identities should use [`IndexId::generate`].
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct IndexId([u8; INDEX_ID_BYTE_LEN]);
 
@@ -46,13 +135,83 @@ impl IndexId {
         INDEX_ID_BIT_LEN
     }
 
+    /// Returns the generation-scheme version used by [`Self::generate`].
+    #[must_use]
+    pub const fn generation_version() -> IndexIdGenerationVersion {
+        IndexIdGenerationVersion::CURRENT
+    }
+
     /// Constructs an `IndexId` from its complete fixed-width binary value.
     ///
-    /// The caller supplies the already-established identity bytes. No hash or
-    /// generation algorithm is selected or executed here.
+    /// This is the low-level binary constructor. It does not itself perform
+    /// hashing or canonicalization.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; INDEX_ID_BYTE_LEN]) -> Self {
         Self(bytes)
+    }
+
+    /// Generates an `IndexId` using the current Phase 2 generation scheme.
+    ///
+    /// The identity basis is:
+    ///
+    /// ```text
+    /// namespace + definition identity (definition identifier + family) + key material
+    /// ```
+    ///
+    /// These values are encoded deterministically, domain-separated, and
+    /// versioned before standard BLAKE3 extendable-output hashing produces the
+    /// exact 64-byte identity value.
+    pub fn generate(
+        namespace: &IndexNamespace,
+        definition: &IndexDefinitionId,
+        family: IndexFamily,
+        key_material: &KeyMaterial,
+    ) -> Result<Self, IndexIdGenerationError> {
+        Self::generate_with_version(
+            Self::generation_version(),
+            namespace,
+            definition,
+            family,
+            key_material,
+        )
+    }
+
+    /// Generates an `IndexId` using an explicit generation-scheme version.
+    ///
+    /// The public API keeps the generation-scheme version separate from
+    /// `IndexVersion`, `SourceVersion`, `SchemaVersion`, and Core contract
+    /// versions. This makes the scheme explicit if a future compatible
+    /// generation version is introduced.
+    pub fn generate_with_version(
+        generation_version: IndexIdGenerationVersion,
+        namespace: &IndexNamespace,
+        definition: &IndexDefinitionId,
+        family: IndexFamily,
+        key_material: &KeyMaterial,
+    ) -> Result<Self, IndexIdGenerationError> {
+        if generation_version != Self::generation_version() {
+            return Err(IndexIdGenerationError::UnsupportedVersion {
+                requested: generation_version,
+                supported: Self::generation_version(),
+            });
+        }
+
+        key_material.validate()?;
+
+        let canonical = canonical_generation_bytes(
+            generation_version,
+            namespace,
+            definition,
+            family,
+            key_material,
+        );
+
+        let mut output = [0_u8; INDEX_ID_BYTE_LEN];
+        let mut hasher = Hasher::new();
+        hasher.update(&canonical);
+        hasher.finalize_xof().fill(&mut output);
+
+        Ok(Self::from_bytes(output))
     }
 
     /// Returns the exact underlying 64-byte identity value.
@@ -90,6 +249,60 @@ impl fmt::Debug for IndexId {
     }
 }
 
+/// Produces the canonical, domain-separated byte representation consumed by
+/// BLAKE3 for IndexId generation.
+///
+/// Encoding contract:
+///
+/// ```text
+/// domain bytes
+/// +
+/// generation version (u32, big-endian)
+/// +
+/// length-prefixed namespace
+/// +
+/// length-prefixed definition identifier
+/// +
+/// length-prefixed canonical key material
+/// ```
+///
+/// Every component is length-delimited so concatenation is unambiguous. The
+/// key component uses [`KeyMaterial::canonical_bytes`] rather than caller
+/// serialization.
+fn canonical_generation_bytes(
+    generation_version: IndexIdGenerationVersion,
+    namespace: &IndexNamespace,
+    definition: &IndexDefinitionId,
+    family: IndexFamily,
+    key_material: &KeyMaterial,
+) -> Vec<u8> {
+    let key_bytes = key_material.canonical_bytes();
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(INDEX_ID_GENERATION_DOMAIN);
+    bytes.extend_from_slice(&generation_version.value().to_be_bytes());
+    encode_bytes(namespace.as_str().as_bytes(), &mut bytes);
+    encode_bytes(definition.as_str().as_bytes(), &mut bytes);
+    encode_family(family, &mut bytes);
+    encode_bytes(&key_bytes, &mut bytes);
+    bytes
+}
+
+fn encode_family(family: IndexFamily, output: &mut Vec<u8>) {
+    let tag = match family {
+        IndexFamily::Identity => 0x01,
+        IndexFamily::Inverted => 0x02,
+        IndexFamily::Relationship => 0x03,
+        IndexFamily::Similarity => 0x04,
+    };
+    output.push(tag);
+}
+
+fn encode_bytes(value: &[u8], output: &mut Vec<u8>) {
+    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    output.extend_from_slice(value);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,12 +319,336 @@ mod tests {
         bytes
     }
 
+    fn namespace() -> IndexNamespace {
+        IndexNamespace::new("quran.text").expect("test namespace must be valid")
+    }
+
+    fn definition() -> IndexDefinitionId {
+        IndexDefinitionId::new("verse-term").expect("test definition ID must be valid")
+    }
+
+    fn key_material(value: &str) -> KeyMaterial {
+        KeyMaterial::text(value)
+    }
+
+    fn generated_id(
+        namespace: &IndexNamespace,
+        definition: &IndexDefinitionId,
+        family: IndexFamily,
+        key_material: &KeyMaterial,
+    ) -> IndexId {
+        IndexId::generate(namespace, definition, family, key_material)
+            .expect("test generation inputs must be valid")
+    }
+
     #[test]
     fn constants_define_the_required_512_bit_width() {
         assert_eq!(INDEX_ID_BYTE_LEN, 64);
         assert_eq!(INDEX_ID_BIT_LEN, 512);
         assert_eq!(IndexId::byte_len(), 64);
         assert_eq!(IndexId::bit_len(), 512);
+    }
+
+    #[test]
+    fn generation_version_is_distinct_and_explicit() {
+        assert_eq!(IndexIdGenerationVersion::CURRENT.value(), 1);
+        assert_eq!(
+            IndexId::generation_version(),
+            IndexIdGenerationVersion::CURRENT
+        );
+        assert_ne!(
+            IndexIdGenerationVersion::CURRENT,
+            IndexIdGenerationVersion::new(2)
+        );
+    }
+
+    #[test]
+    fn generate_is_deterministic_for_identical_logical_input() {
+        let namespace = namespace();
+        let definition = definition();
+        let key = key_material("lemma");
+
+        let first = generated_id(&namespace, &definition, IndexFamily::Inverted, &key);
+        let second = generated_id(&namespace, &definition, IndexFamily::Inverted, &key);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn changing_namespace_changes_generated_index_id() {
+        let first_namespace = IndexNamespace::new("quran.text").expect("namespace must be valid");
+        let second_namespace = IndexNamespace::new("quran.word").expect("namespace must be valid");
+        let definition = definition();
+        let key = key_material("lemma");
+
+        let first = generated_id(&first_namespace, &definition, IndexFamily::Inverted, &key);
+        let second = generated_id(&second_namespace, &definition, IndexFamily::Inverted, &key);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn changing_definition_changes_generated_index_id() {
+        let namespace = namespace();
+        let first_definition =
+            IndexDefinitionId::new("verse-term").expect("definition must be valid");
+        let second_definition =
+            IndexDefinitionId::new("verse-lemma").expect("definition must be valid");
+        let key = key_material("lemma");
+
+        let first = generated_id(&namespace, &first_definition, IndexFamily::Inverted, &key);
+        let second = generated_id(&namespace, &second_definition, IndexFamily::Inverted, &key);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn changing_index_family_changes_generated_index_id() {
+        let namespace = namespace();
+        let definition = definition();
+        let key = key_material("lemma");
+
+        let first = generated_id(&namespace, &definition, IndexFamily::Identity, &key);
+        let second = generated_id(&namespace, &definition, IndexFamily::Inverted, &key);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn changing_key_material_changes_generated_index_id() {
+        let namespace = namespace();
+        let definition = definition();
+        let first_key = key_material("lemma");
+        let second_key = key_material("root");
+
+        let first = generated_id(&namespace, &definition, IndexFamily::Inverted, &first_key);
+        let second = generated_id(&namespace, &definition, IndexFamily::Inverted, &second_key);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn generated_index_id_is_exactly_64_bytes() {
+        let id = generated_id(&namespace(), &definition(), IndexFamily::Inverted, &key_material("lemma"));
+
+        assert_eq!(id.as_bytes().len(), 64);
+        assert_eq!(IndexId::byte_len(), 64);
+        assert_eq!(IndexId::bit_len(), 512);
+    }
+
+    #[test]
+    fn key_material_validation_is_enforced_before_generation() {
+        let invalid = KeyMaterial::text("bad\nvalue");
+
+        let error = IndexId::generate(
+            &namespace(),
+            &definition(),
+            IndexFamily::Inverted,
+            &invalid,
+        )
+        .expect_err("invalid key material must be rejected");
+
+        assert!(matches!(
+            error,
+            IndexIdGenerationError::InvalidKeyMaterial(
+                KeyMaterialValidationError::TextControlCharacter { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn canonical_generation_input_is_deterministic() {
+        let namespace = namespace();
+        let definition = definition();
+        let key = key_material("lemma");
+
+        let first = canonical_generation_bytes(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        );
+        let second = canonical_generation_bytes(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        );
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn canonical_generation_input_has_unambiguous_component_boundaries() {
+        let left = IndexDefinitionId::new("bc").expect("definition must be valid");
+        let right = IndexDefinitionId::new("c").expect("definition must be valid");
+        let namespace = IndexNamespace::new("a").expect("namespace must be valid");
+        let key = KeyMaterial::text("k");
+
+        let first = canonical_generation_bytes(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &left,
+            IndexFamily::Inverted,
+            &key,
+        );
+        let second = canonical_generation_bytes(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &right,
+            IndexFamily::Inverted,
+            &key,
+        );
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn generation_version_participates_in_the_canonical_input_and_unsupported_versions_are_rejected() {
+        let namespace = namespace();
+        let definition = definition();
+        let key = key_material("lemma");
+
+        let first_bytes = canonical_generation_bytes(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        );
+        let second_bytes = canonical_generation_bytes(
+            IndexIdGenerationVersion::new(2),
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        );
+
+        assert_ne!(first_bytes, second_bytes);
+
+        let first = IndexId::generate_with_version(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        )
+        .expect("current generation version should succeed");
+        assert!(IndexId::generate_with_version(
+            IndexIdGenerationVersion::new(2),
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        )
+        .is_err());
+
+        assert_ne!(first, IndexId::from_bytes([0_u8; INDEX_ID_BYTE_LEN]));
+    }
+
+    #[test]
+    fn unsupported_generation_version_is_reported_explicitly() {
+        let error = IndexId::generate_with_version(
+            IndexIdGenerationVersion::new(2),
+            &namespace(),
+            &definition(),
+            IndexFamily::Inverted,
+            &key_material("lemma"),
+        )
+        .expect_err("unsupported generation version must be rejected");
+
+        assert_eq!(
+            error,
+            IndexIdGenerationError::UnsupportedVersion {
+                requested: IndexIdGenerationVersion::new(2),
+                supported: IndexIdGenerationVersion::CURRENT,
+            }
+        );
+        assert!(std::error::Error::source(&error).is_none());
+        assert!(error.to_string().contains("unsupported IndexId generation version"));
+    }
+
+    #[test]
+    fn domain_separation_is_part_of_the_hashed_input() {
+        let namespace = namespace();
+        let definition = definition();
+        let key = key_material("lemma");
+        let canonical = canonical_generation_bytes(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        );
+
+        let mut unqualified = [0_u8; INDEX_ID_BYTE_LEN];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&canonical[INDEX_ID_GENERATION_DOMAIN.len() + core::mem::size_of::<u32>()..]);
+        hasher.finalize_xof().fill(&mut unqualified);
+
+        let generated = generated_id(&namespace, &definition, IndexFamily::Inverted, &key);
+
+        assert_ne!(generated.as_bytes(), &unqualified);
+    }
+
+    #[test]
+    fn generated_id_matches_the_explicit_blake3_xof_contract() {
+        let namespace = namespace();
+        let definition = definition();
+        let key = key_material("lemma");
+        let canonical = canonical_generation_bytes(
+            IndexIdGenerationVersion::CURRENT,
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        );
+
+        let mut expected = [0_u8; INDEX_ID_BYTE_LEN];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&canonical);
+        hasher.finalize_xof().fill(&mut expected);
+
+        let actual = IndexId::generate(
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        )
+        .expect("generation should succeed");
+
+        assert_eq!(actual.as_bytes(), &expected);
+    }
+
+    #[test]
+    fn generated_id_matches_a_fixed_known_answer_vector() {
+        let namespace = IndexNamespace::new("quran.text").expect("namespace must be valid");
+        let definition = IndexDefinitionId::new("verse-term").expect("definition must be valid");
+        let key = KeyMaterial::text("lemma");
+
+        let actual = IndexId::generate(
+            &namespace,
+            &definition,
+            IndexFamily::Inverted,
+            &key,
+        )
+        .expect("generation should succeed");
+
+        const EXPECTED_HEX: &str =
+            "6f26138643aaca2e49a5645e5eae4f5341f96b05d20d8f5901aa2c1457a5f16313c0a57684af0c8329a4693a5785ba814d899e708d72cfcbd36835afa7b3d0c9";
+        assert_eq!(hex_encode(actual.as_bytes()), EXPECTED_HEX);
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        encoded
     }
 
     #[test]

@@ -1,8 +1,8 @@
-//! Public identity boundary for the Phase 1 Indexing model.
+//! Public identity boundary for the Phase 1 + Phase 2 Indexing model.
 //!
-//! This module composes the three identity implementation files:
+//! This module composes the identity implementation files:
 //!
-//! - [`index`] defines `IndexId`.
+//! - [`index`] defines `IndexId` and the frozen Phase 2 generation scheme.
 //! - [`namespace`] defines `IndexNamespace` and `NamespaceRegistry`.
 //! - [`definition`] defines `IndexDefinitionId` and `IndexDefinitionIdentity`.
 //!
@@ -17,7 +17,9 @@ pub mod namespace;
 pub use definition::{
     IndexDefinitionId, IndexDefinitionIdValidationError, IndexDefinitionIdentity,
 };
-pub use index::{INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexId};
+pub use index::{
+    INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexId, IndexIdGenerationError, IndexIdGenerationVersion,
+};
 pub use namespace::{
     IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry, NamespaceRegistryError,
     NamespaceValidationError,
@@ -26,14 +28,14 @@ pub use namespace::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::IndexFamily;
+    use crate::index::{IndexFamily, KeyMaterial};
 
     fn index_id(seed: u8) -> IndexId {
         let bytes = core::array::from_fn(|offset| seed.wrapping_add(offset as u8));
         IndexId::from_bytes(bytes)
     }
 
-    fn make_namespace(value: &str) -> IndexNamespace {
+    fn namespace(value: &str) -> IndexNamespace {
         IndexNamespace::new(value).expect("test namespace must be valid")
     }
 
@@ -44,7 +46,7 @@ mod tests {
     #[test]
     fn identity_boundary_reexports_all_phase_one_identity_types() {
         let index = index_id(1);
-        let namespace = make_namespace("lexical");
+        let namespace = namespace("lexical");
         let definition_id = definition_id("lexical.v1");
 
         let definition = IndexDefinitionIdentity::new(
@@ -62,11 +64,28 @@ mod tests {
     }
 
     #[test]
+    fn identity_boundary_reexports_phase_two_index_id_generation_contract() {
+        let namespace = namespace("quran.text");
+        let definition = definition_id("verse-term");
+        let key = KeyMaterial::text("lemma");
+
+        let version = IndexIdGenerationVersion::CURRENT;
+        assert_eq!(version.value(), 1);
+        assert_eq!(IndexId::generation_version(), version);
+
+        let generated =
+            IndexId::generate(&namespace, &definition, IndexFamily::Inverted, &key)
+            .expect("generation should succeed");
+
+        assert_eq!(generated.as_bytes().len(), INDEX_ID_BYTE_LEN);
+    }
+
+    #[test]
     fn namespace_registry_and_definition_identity_compose_without_physical_semantics() {
         let mut registry = NamespaceRegistry::new();
 
-        let lexical = make_namespace("lexical");
-        let relationship = make_namespace("kg.relationship");
+        let lexical = namespace("lexical");
+        let relationship = namespace("kg.relationship");
 
         registry
             .register(lexical.clone())
@@ -98,12 +117,12 @@ mod tests {
 
         let lexical = IndexDefinitionIdentity::new(
             definition_id.clone(),
-            make_namespace("lexical"),
+            namespace("lexical"),
             IndexFamily::Inverted,
         );
         let identity = IndexDefinitionIdentity::new(
             definition_id,
-            make_namespace("identity"),
+            namespace("identity"),
             IndexFamily::Identity,
         );
 
@@ -118,7 +137,7 @@ mod tests {
         let index = index_id(9);
         let definition = IndexDefinitionIdentity::new(
             definition_id("definition.v1"),
-            make_namespace("lexical"),
+            namespace("lexical"),
             IndexFamily::Inverted,
         );
 
@@ -135,8 +154,8 @@ mod tests {
     fn namespace_registry_snapshot_preserves_logical_identity_values() {
         let mut registry = NamespaceRegistry::new();
 
-        let first = make_namespace("alpha");
-        let second = make_namespace("beta");
+        let first = namespace("alpha");
+        let second = namespace("beta");
 
         registry
             .register(first.clone())
@@ -152,7 +171,7 @@ mod tests {
     fn definition_identity_keeps_family_as_indexing_vocabulary() {
         let definition = IndexDefinitionIdentity::new(
             definition_id("relationship-index"),
-            make_namespace("kg.relationship"),
+            namespace("kg.relationship"),
             IndexFamily::Relationship,
         );
 

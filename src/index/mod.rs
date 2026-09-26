@@ -11,6 +11,35 @@
 //! - [`IndexFamily::Relationship`]
 //! - [`IndexFamily::Similarity`]
 
+// Phase 2 logical index contracts.
+pub mod definition;
+pub mod entry;
+pub mod key;
+pub mod query;
+pub mod reference;
+pub mod similarity;
+pub mod version;
+
+pub use definition::{
+    ConsistencyRequirement, ConsistencyRequirementValidationError, IndexDefinition,
+    IndexDefinitionValidationError, TargetReferenceType, TargetReferenceTypeValidationError,
+    Uniqueness,
+};
+pub use entry::{IndexEntry, IndexEntryValidationError};
+pub use key::{
+    KeyDefinition, KeyDefinitionValidationError, KeyField, KeyMaterial, KeyMaterialValidationError,
+};
+pub use query::{
+    MetricKind, QueryHit, QueryHitValidationError, QueryRequest, QueryRequestValidationError,
+    QueryResult, QueryResultValidationError,
+};
+pub use reference::{ObjectReference, ObjectReferenceValidationError};
+pub use similarity::{SimilarityEntry, SimilarityEntryValidationError};
+pub use version::{
+    IndexVersion, IndexVersionId, IndexVersionIdValidationError, IndexVersionValidationError,
+    SchemaVersion, SchemaVersionValidationError, SourceVersion, SourceVersionValidationError,
+};
+
 use core::fmt;
 
 /// Identifies the logical family of an index.
@@ -185,5 +214,78 @@ mod tests {
         let family = IndexFamily::Similarity;
 
         assert_eq!(family.to_string(), "similarity");
+    }
+}
+
+#[cfg(test)]
+mod phase_two_module_tests {
+    use super::*;
+
+    #[test]
+    fn phase_two_logical_index_contracts_are_publicly_reachable() {
+        let namespace =
+            crate::identity::IndexNamespace::new("quran").expect("test namespace should be valid");
+        let definition_id = crate::identity::IndexDefinitionId::new("verse-term")
+            .expect("test definition id should be valid");
+        let identity = crate::identity::IndexDefinitionIdentity::new(
+            definition_id,
+            namespace,
+            IndexFamily::Inverted,
+        );
+
+        let key_definition =
+            KeyDefinition::new(["term"]).expect("test key definition should be valid");
+        let target_type =
+            TargetReferenceType::new("quran-verse").expect("test target type should be valid");
+        let consistency =
+            ConsistencyRequirement::new("logical").expect("test consistency should be valid");
+
+        let definition = IndexDefinition::new(
+            identity,
+            key_definition,
+            target_type,
+            Uniqueness::NonUnique,
+            consistency,
+            None,
+            None,
+        )
+        .expect("test definition should be valid");
+
+        assert_eq!(definition.family(), IndexFamily::Inverted);
+    }
+
+    #[test]
+    fn entry_and_reference_exports_are_connected() {
+        let reference =
+            ObjectReference::new("quran", "verse:2:255").expect("test reference should be valid");
+        let entry = IndexEntry::new(KeyMaterial::text("term"), reference)
+            .expect("test entry should be valid");
+
+        assert_eq!(entry.key(), &KeyMaterial::text("term"));
+    }
+
+    #[test]
+    fn query_and_similarity_exports_are_connected() {
+        let reference =
+            ObjectReference::new("quran", "verse:2:255").expect("test reference should be valid");
+
+        let similarity = SimilarityEntry::new(KeyMaterial::bytes(vec![1, 2, 3]), reference.clone())
+            .expect("test similarity entry should be valid");
+
+        let version_id = IndexVersionId::new("v1").expect("test version id should be valid");
+        let version = IndexVersion::new(version_id);
+
+        let index_id =
+            crate::identity::IndexId::from_bytes([0u8; crate::identity::index::INDEX_ID_BYTE_LEN]);
+        let request = QueryRequest::new(index_id, KeyMaterial::text("term"))
+            .expect("test query request should be valid");
+
+        let hit = QueryHit::new(reference);
+        let result = QueryResult::new(index_id, version, vec![hit])
+            .expect("test query result should be valid");
+
+        assert_eq!(request.query(), &KeyMaterial::text("term"));
+        assert_eq!(similarity.metadata(), None);
+        assert_eq!(result.hits().len(), 1);
     }
 }
