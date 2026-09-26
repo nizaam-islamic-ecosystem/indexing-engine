@@ -124,9 +124,24 @@ fn generated_index_id_changes_when_namespace_definition_or_key_material_changes(
     let alternate_key = KeyMaterial::text("root");
 
     let base = generated_index_id(&name_space, &definition, IndexFamily::Inverted, &key);
-    let namespace_changed = generated_index_id(&alternate_namespace, &definition, IndexFamily::Inverted, &key);
-    let definition_changed = generated_index_id(&name_space, &alternate_definition, IndexFamily::Inverted, &key);
-    let key_changed = generated_index_id(&name_space, &definition, IndexFamily::Inverted, &alternate_key);
+    let namespace_changed = generated_index_id(
+        &alternate_namespace,
+        &definition,
+        IndexFamily::Inverted,
+        &key,
+    );
+    let definition_changed = generated_index_id(
+        &name_space,
+        &alternate_definition,
+        IndexFamily::Inverted,
+        &key,
+    );
+    let key_changed = generated_index_id(
+        &name_space,
+        &definition,
+        IndexFamily::Inverted,
+        &alternate_key,
+    );
 
     assert_ne!(base, namespace_changed);
     assert_ne!(base, definition_changed);

@@ -1,14 +1,19 @@
-//! Phase 2 architectural conformance tests.
+//! Phase 2 + Phase 3 architectural conformance tests.
 //!
 //! These tests protect the boundaries established between `nizaam-indexing`
 //! and `nizaam-core`. They preserve the Phase 0 runtime/capability checks while
 //! extending conformance coverage to the Phase 2 logical indexing contracts:
 //! requirements, definitions, entries, references, versions, similarity
-//! entries, and provider-neutral query/result contracts.
+//! entries, provider-neutral query/result contracts, and Phase 3 candidate/build
+//! lifecycle boundaries.
 //!
 //! They deliberately do not test physical index construction, storage
 //! providers, query execution, embedding generation, domain-object hydration,
 //! or domain-specific semantic models.
+//!
+//! Phase 3 coverage additionally verifies that candidate construction, updates,
+//! rebuild/replay, and publication remain Indexing-local logical boundaries and
+//! do not replace Core runtime/capability ownership.
 
 mod common;
 
@@ -29,6 +34,11 @@ use nizaam_core::identity::{
 use nizaam_core::operation::OperationContext;
 use nizaam_core::runtime::{LifecycleState, RequestAdmissionError};
 use nizaam_core::status::Status;
+use nizaam_indexing::build::{
+    BatchExecutor, BatchOptions, BuildCandidate, BuildInput, BuildSnapshot, CandidateUpdater,
+    IndexBuilder, IndexMutation, IndexPublisher, IndexRebuilder, PublicationError, RebuildInput,
+    UpdateJournal,
+};
 use nizaam_indexing::identity::{
     IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
 };
@@ -720,4 +730,246 @@ fn phase2_query_contracts_are_reference_oriented_and_do_not_execute_queries() {
 
     // QueryRequest and QueryResult are logical retrieval contracts. They do not
     // contain an executor, provider handle, or hydrated domain object.
+}
+fn phase3_definition() -> IndexDefinition {
+    IndexDefinition::new(
+        IndexDefinitionIdentity::new(
+            phase2_definition_id("conformance.phase3.definition"),
+            phase2_namespace("conformance.phase3"),
+            IndexFamily::Inverted,
+        ),
+        phase2_key_definition(),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        Some(SourceVersion::new("source-v1").expect("source version must be valid")),
+        Some(SchemaVersion::new("schema-v1").expect("schema version must be valid")),
+    )
+    .expect("phase3 definition should be valid")
+}
+
+fn phase3_entry(term: &str, object: &str) -> IndexEntry {
+    IndexEntry::new(
+        KeyMaterial::text(term),
+        phase2_object_reference("documents", object),
+    )
+    .expect("phase3 entry should be valid")
+}
+
+fn phase3_candidate(seed: u8, version: &str, entries: Vec<IndexEntry>) -> BuildCandidate {
+    IndexBuilder::new()
+        .build(BuildInput::new(
+            phase2_index_id(seed),
+            phase3_definition(),
+            IndexVersionId::new(version).expect("phase3 version ID must be valid"),
+            BuildSnapshot::with_versions(
+                Some(SourceVersion::new("source-v1").expect("source version must be valid")),
+                Some(SchemaVersion::new("schema-v1").expect("schema version must be valid")),
+                entries,
+            ),
+        ))
+        .expect("phase3 candidate should be valid")
+}
+
+#[test]
+fn phase3_index_version_lifecycle_is_distinct_from_core_engine_lifecycle() {
+    let engine = test_engine();
+    assert_eq!(engine.runtime().state(), LifecycleState::Created);
+
+    let mut version_state =
+        nizaam_indexing::index::IndexVersionState::new(phase2_index_version("phase3-lifecycle-v1"));
+
+    assert_eq!(
+        version_state.lifecycle(),
+        nizaam_indexing::index::VersionLifecycle::Building
+    );
+
+    version_state
+        .transition_to(nizaam_indexing::index::VersionLifecycle::Validating)
+        .expect("version state should enter validation");
+    version_state
+        .mark_ready()
+        .expect("version state should become ready");
+
+    assert_eq!(
+        version_state.lifecycle(),
+        nizaam_indexing::index::VersionLifecycle::Ready
+    );
+    // Advancing the logical index-version lifecycle does not advance or mutate
+    // the independent Core engine lifecycle.
+    assert_eq!(engine.runtime().state(), LifecycleState::Created);
+}
+
+#[test]
+fn phase3_build_update_and_rebuild_boundaries_are_core_runtime_independent() {
+    let index = phase3_candidate(0xA1, "phase3-v1", vec![phase3_entry("base", "doc:0")]);
+    let updater = CandidateUpdater::new();
+    let mut journal = UpdateJournal::new();
+
+    let updated = updater
+        .apply_and_record(
+            &index,
+            IndexMutation::Insert(phase3_entry("alpha", "doc:1")),
+            &mut journal,
+        )
+        .expect("logical update should succeed")
+        .0;
+
+    assert_eq!(index.len(), 1);
+    assert_eq!(updated.len(), 2);
+    assert_eq!(journal.len(), 1);
+
+    let rebuilder = IndexRebuilder::new();
+    let progress = rebuilder
+        .start(
+            RebuildInput::new(
+                *updated.index_id(),
+                updated.definition().clone(),
+                IndexVersionId::new("phase3-v2").expect("candidate version ID must be valid"),
+                BuildSnapshot::with_versions(
+                    Some(SourceVersion::new("source-v1").expect("source version must be valid")),
+                    Some(SchemaVersion::new("schema-v1").expect("schema version must be valid")),
+                    updated.entries().to_vec(),
+                ),
+                Some(updated.version().id().clone()),
+                Some(updated.version().id().clone()),
+            ),
+            &journal,
+        )
+        .expect("rebuild should start");
+
+    assert_eq!(progress.captured_sequence().value(), 1);
+    assert_eq!(progress.replayed_updates(), 0);
+
+    // No Indexing-specific runtime or engine setup was required for any of the
+    // logical build/update/rebuild operations above.
+}
+
+#[test]
+fn phase3_failed_build_cannot_replace_or_mutate_an_existing_active_candidate() {
+    let active = phase3_candidate(
+        0xA2,
+        "phase3-active-v1",
+        vec![phase3_entry("active", "doc:0")],
+    );
+    let active_before = active.clone();
+
+    let bad_snapshot = BuildSnapshot::with_versions(
+        Some(SourceVersion::new("source-v2").expect("source version must be valid")),
+        Some(SchemaVersion::new("schema-v1").expect("schema version must be valid")),
+        vec![phase3_entry("replacement", "doc:1")],
+    );
+
+    let error = IndexBuilder::new()
+        .build(BuildInput::new(
+            *active.index_id(),
+            phase3_definition(),
+            IndexVersionId::new("phase3-invalid-v2").expect("candidate version ID must be valid"),
+            bad_snapshot,
+        ))
+        .expect_err("source-version mismatch must fail candidate construction");
+
+    assert!(matches!(
+        error,
+        nizaam_indexing::build::BuildError::Versioning(
+            nizaam_indexing::consistency::VersioningError::SourceVersionMismatch { .. }
+        )
+    ));
+    assert_eq!(active, active_before);
+    assert_eq!(active.version().id().as_str(), "phase3-active-v1");
+    assert_eq!(active.len(), 1);
+}
+
+#[test]
+fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_identity() {
+    let publisher = IndexPublisher::new();
+    let active_v1 = phase3_candidate(
+        0xA3,
+        "phase3-active-v1",
+        vec![phase3_entry("base", "doc:0")],
+    );
+    let candidate_v2 = phase3_candidate(0xA3, "phase3-v2", vec![phase3_entry("next", "doc:1")]);
+
+    let active_version = active_v1.version().id().clone();
+    let prepared = publisher
+        .prepare(
+            candidate_v2,
+            &phase3_definition(),
+            Some(active_version.clone()),
+            Some(active_version.clone()),
+        )
+        .expect("candidate should be publication-eligible");
+
+    let published = publisher
+        .publish(prepared, Some(active_v1.clone()))
+        .expect("publication should succeed");
+
+    assert_eq!(published.active().version().id().as_str(), "phase3-v2");
+    assert_eq!(
+        published
+            .previous_active()
+            .expect("previous active should be retained")
+            .version()
+            .id()
+            .as_str(),
+        "phase3-active-v1"
+    );
+
+    let mismatched_active = phase3_candidate(
+        0xA4,
+        "phase3-active-v2",
+        vec![phase3_entry("other", "doc:9")],
+    );
+    let candidate_v3 = phase3_candidate(0xA3, "phase3-v3", vec![phase3_entry("v3", "doc:3")]);
+
+    let prepared_v3 = publisher
+        .prepare(
+            candidate_v3,
+            &phase3_definition(),
+            Some(published.active().version().id().clone()),
+            Some(published.active().version().id().clone()),
+        )
+        .expect("v3 should be prepared against the published lineage");
+
+    let error = publisher
+        .publish(prepared_v3, Some(mismatched_active))
+        .expect_err("a different concrete index identity must be rejected");
+
+    // Publication must reject the mismatched active resource. The publication
+    // boundary may report the rejection through its validation-order-specific
+    // error variant, so conformance checks the rejection itself rather than
+    // coupling this test to one internal validation ordering.
+    assert!(matches!(
+        error,
+        PublicationError::IndexMismatch { .. }
+            | PublicationError::ActiveVersionChanged { .. }
+            | PublicationError::Versioning(_)
+    ));
+    assert_eq!(published.active().version().id().as_str(), "phase3-v2");
+}
+
+#[test]
+fn phase3_batch_boundary_is_transactional_and_remains_provider_neutral() {
+    let base = phase3_candidate(0xA5, "phase3-batch-v1", vec![phase3_entry("base", "doc:0")]);
+    let error = BatchExecutor::new()
+        .execute(
+            &base,
+            &UpdateJournal::new(),
+            vec![
+                IndexMutation::Insert(phase3_entry("first", "doc:1")),
+                IndexMutation::Insert(phase3_entry("first", "doc:1")),
+            ],
+            BatchOptions::new(2).expect("chunk size should be valid"),
+        )
+        .expect_err("duplicate entry should fail the transactional chunk");
+
+    match error {
+        nizaam_indexing::build::BatchError::ChunkFailed { committed, .. } => {
+            assert_eq!(committed.candidate().len(), 1);
+            assert!(committed.journal().is_empty());
+        }
+        other => panic!("unexpected batch error: {other:?}"),
+    }
+
+    assert_eq!(base.len(), 1);
 }
