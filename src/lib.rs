@@ -1,11 +1,12 @@
 //! Public library boundary for the Nizaam Indexing Engine.
 //!
 //! The crate root exposes the established Indexing module tree and the public
-//! logical contracts implemented across Phase 1 and Phase 2.
+//! logical contracts implemented across Phase 1, Phase 2, and Phase 3.
 //!
 //! The public boundary keeps ownership explicit:
 //! - `identity` defines Indexing identities and logical namespaces.
-//! - `index` defines logical index families and Phase 2 index contracts.
+//! - `index` defines logical index families, logical index contracts, and the
+//!   Phase 3 index-version lifecycle contract.
 //! - `requirement` defines the source-to-Indexing requirement contract.
 //! - Core-owned runtime, capability, lifecycle, contract, and execution
 //!   infrastructure remains owned by `nizaam-core` and is surfaced here only
@@ -45,12 +46,45 @@ pub use identity::{
 pub use index::{
     ConsistencyRequirement, ConsistencyRequirementValidationError, IndexDefinition,
     IndexDefinitionValidationError, IndexEntry, IndexEntryValidationError, IndexFamily,
-    IndexVersion, IndexVersionId, IndexVersionIdValidationError, IndexVersionValidationError,
-    KeyDefinition, KeyDefinitionValidationError, KeyField, KeyMaterial, KeyMaterialValidationError,
-    MetricKind, ObjectReference, ObjectReferenceValidationError, QueryHit, QueryHitValidationError,
-    QueryRequest, QueryRequestValidationError, QueryResult, QueryResultValidationError,
-    SchemaVersion, SchemaVersionValidationError, SimilarityEntry, SimilarityEntryValidationError,
-    SourceVersion, SourceVersionValidationError, TargetReferenceType,
-    TargetReferenceTypeValidationError, Uniqueness,
+    IndexVersion, IndexVersionId, IndexVersionIdValidationError, IndexVersionState,
+    IndexVersionValidationError, KeyDefinition, KeyDefinitionValidationError, KeyField,
+    KeyMaterial, KeyMaterialValidationError, MetricKind, ObjectReference,
+    ObjectReferenceValidationError, QueryHit, QueryHitValidationError, QueryRequest,
+    QueryRequestValidationError, QueryResult, QueryResultValidationError, SchemaVersion,
+    SchemaVersionValidationError, SimilarityEntry, SimilarityEntryValidationError, SourceVersion,
+    SourceVersionValidationError, TargetReferenceType, TargetReferenceTypeValidationError,
+    Uniqueness, VersionLifecycle, VersionLifecycleTransitionError, VersionValueValidationError,
 };
 pub use requirement::{IndexRequirement, IndexRequirementValidationError};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase3_version_lifecycle_contract_is_publicly_reachable() {
+        let version_id =
+            IndexVersionId::new("crate-root-phase3-v1").expect("test version ID should be valid");
+        let version = IndexVersion::new(version_id);
+        let mut state = IndexVersionState::new(version);
+
+        assert_eq!(state.lifecycle(), VersionLifecycle::Building);
+        assert!(state.is_candidate());
+        assert!(!state.is_published());
+
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("building should transition to validating");
+        state
+            .mark_ready()
+            .expect("validating should transition to ready");
+
+        assert_eq!(state.lifecycle(), VersionLifecycle::Ready);
+        assert!(VersionLifecycle::Ready.can_transition_to(VersionLifecycle::Published));
+
+        // Compile-time reachability checks for the newly exported public error
+        // types without constructing an invalid value.
+        let _: Option<VersionLifecycleTransitionError> = None;
+        let _: Option<VersionValueValidationError> = None;
+    }
+}

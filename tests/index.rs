@@ -1,4 +1,4 @@
-//! Level 3 integration tests for the Phase 2 Indexing data model.
+//! Level 3 integration tests for the Phase 2 + Phase 3 Indexing data model.
 //!
 //! These tests exercise the public logical index contracts from outside the
 //! crate. They verify that definitions, entries, references, similarity data,
@@ -6,6 +6,9 @@
 //! storage/provider behavior or domain-semantic ownership.
 //!
 //! The tests intentionally remain provider-neutral and reference-oriented.
+//!
+//! Phase 3 coverage extends the logical version contract with candidate lifecycle
+//! state and verifies that candidate state remains distinct from active ownership.
 
 use nizaam_indexing::identity::{
     IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
@@ -373,4 +376,113 @@ fn domain_and_provider_specific_types_are_not_required_by_the_phase_two_model() 
     // This composition uses only logical Indexing contracts. No database,
     // storage-provider, partition, shard, embedding-provider, or domain
     // object type participates in the public model.
+}
+#[test]
+fn phase3_version_lifecycle_is_publicly_reachable_from_index_boundary() {
+    let version = IndexVersion::new(
+        IndexVersionId::new("phase3-index-v1").expect("test version ID must be valid"),
+    );
+    let mut state = nizaam_indexing::index::IndexVersionState::new(version.clone());
+
+    assert_eq!(state.version(), &version);
+    assert_eq!(
+        state.lifecycle(),
+        nizaam_indexing::index::VersionLifecycle::Building
+    );
+    assert!(state.is_candidate());
+    assert!(!state.is_published());
+
+    state
+        .transition_to(nizaam_indexing::index::VersionLifecycle::Validating)
+        .expect("building should transition to validating");
+    state
+        .mark_ready()
+        .expect("validating should transition to ready");
+
+    assert_eq!(
+        state.lifecycle(),
+        nizaam_indexing::index::VersionLifecycle::Ready
+    );
+}
+
+#[test]
+fn phase3_lifecycle_requires_validation_and_ready_before_publication() {
+    let version = index_version("phase3-index-v2");
+    let mut state = nizaam_indexing::index::IndexVersionState::new(version);
+
+    let error = state
+        .mark_published()
+        .expect_err("building must not bypass validating and ready");
+
+    assert_eq!(
+        error.from(),
+        nizaam_indexing::index::VersionLifecycle::Building
+    );
+    assert_eq!(
+        error.to(),
+        nizaam_indexing::index::VersionLifecycle::Published
+    );
+
+    state
+        .transition_to(nizaam_indexing::index::VersionLifecycle::Validating)
+        .expect("building should transition to validating");
+    state
+        .transition_to(nizaam_indexing::index::VersionLifecycle::Ready)
+        .expect("validating should transition to ready");
+    state
+        .mark_published()
+        .expect("ready should cross the publication boundary");
+
+    assert!(state.is_published());
+    assert!(state.lifecycle().is_terminal());
+}
+
+#[test]
+fn phase3_failed_or_cancelled_candidates_remain_unpublished() {
+    let failed_version = index_version("phase3-failed");
+    let mut failed = nizaam_indexing::index::IndexVersionState::new(failed_version);
+    failed
+        .mark_failed()
+        .expect("building candidate may transition to failed");
+
+    assert!(failed.is_candidate());
+    assert!(!failed.is_published());
+    assert!(failed.lifecycle().is_terminal());
+
+    let cancelled_version = index_version("phase3-cancelled");
+    let mut cancelled = nizaam_indexing::index::IndexVersionState::new(cancelled_version);
+    cancelled
+        .mark_cancelled()
+        .expect("building candidate may transition to cancelled");
+
+    assert!(cancelled.is_candidate());
+    assert!(!cancelled.is_published());
+    assert!(cancelled.lifecycle().is_terminal());
+}
+
+#[test]
+fn phase3_multiple_candidate_states_remain_independently_trackable() {
+    let first =
+        nizaam_indexing::index::IndexVersionState::new(index_version("phase3-candidate-v2"));
+    let second =
+        nizaam_indexing::index::IndexVersionState::new(index_version("phase3-candidate-v3"));
+    let third =
+        nizaam_indexing::index::IndexVersionState::new(index_version("phase3-candidate-v4"));
+
+    assert_ne!(first.id(), second.id());
+    assert_ne!(second.id(), third.id());
+    assert_ne!(first.id(), third.id());
+
+    assert_eq!(
+        first.lifecycle(),
+        nizaam_indexing::index::VersionLifecycle::Building
+    );
+    assert_eq!(
+        second.lifecycle(),
+        nizaam_indexing::index::VersionLifecycle::Building
+    );
+    assert_eq!(
+        third.lifecycle(),
+        nizaam_indexing::index::VersionLifecycle::Building
+    );
 }

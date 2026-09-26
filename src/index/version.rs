@@ -8,12 +8,20 @@
 //! - schema version,
 //! - Core contract version.
 //!
-//! This module establishes only the logical version model. It does not
-//! implement candidate construction, rebuilds, publication, active-version
-//! switching, persistence, or synchronization workflows.
+//! The logical `IndexVersion` value remains separate from Phase 3 lifecycle
+//! state. Phase 3 adds a small lifecycle wrapper around the value without
+//! turning the version itself into a runtime manager. Candidate construction,
+//! rebuild orchestration, publication coordination, persistence, and
+//! synchronization remain outside this value-level module.
 
 use super::key::KeyMaterial;
+use crate::error::IndexingResult;
 use core::fmt;
+use nizaam_core::contracts::Version as CoreVersion;
+use nizaam_core::error::{
+    ErrorClass, ErrorCode, ErrorContext, ErrorEvent, ErrorOwner, GlobalError, Severity,
+};
+use nizaam_core::status::Retryability;
 
 /// Opaque logical identity of one Indexing index version.
 ///
@@ -239,6 +247,222 @@ impl fmt::Display for SchemaVersion {
     }
 }
 
+/// Lifecycle of one logical Indexing version.
+///
+/// This lifecycle is intentionally narrower than the Core artifact lifecycle
+/// and the Core engine lifecycle. It describes only the state of an Indexing
+/// version while it is being constructed and published:
+///
+/// ```text
+/// Building → Validating → Ready → Published
+///     │            │          │
+///     └────────────┴──────────┴→ Failed / Cancelled
+/// ```
+///
+/// `Published` means the version has crossed the Indexing publication
+/// boundary. Which published version is the current active version is owned by
+/// the surrounding Indexing lifecycle manager, not by this value type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum VersionLifecycle {
+    /// The candidate version is being constructed or populated.
+    Building,
+
+    /// The candidate version is undergoing logical validation.
+    Validating,
+
+    /// Validation completed successfully and the candidate is eligible for
+    /// the publication boundary.
+    Ready,
+
+    /// The version has successfully crossed the publication boundary.
+    ///
+    /// Publication does not make this value the unique current active version;
+    /// the lifecycle owner coordinates active ownership across candidates.
+    Published,
+
+    /// Construction or validation failed. The version remains unpublished.
+    Failed,
+
+    /// Construction, validation, or related work was cancelled. The version
+    /// remains unpublished.
+    Cancelled,
+}
+
+impl VersionLifecycle {
+    /// Returns whether the lifecycle state represents an unpublished
+    /// candidate, including terminal failed/cancelled candidates.
+    #[must_use]
+    pub const fn is_candidate(self) -> bool {
+        matches!(
+            self,
+            Self::Building | Self::Validating | Self::Ready | Self::Failed | Self::Cancelled
+        )
+    }
+
+    /// Returns whether the version has crossed the Indexing publication
+    /// boundary.
+    #[must_use]
+    pub const fn is_published(self) -> bool {
+        matches!(self, Self::Published)
+    }
+
+    /// Returns whether the lifecycle state is terminal.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Published | Self::Failed | Self::Cancelled)
+    }
+
+    /// Returns whether a direct transition between two lifecycle states is
+    /// valid. Repeating the same state is a valid no-op.
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Building, Self::Building)
+                | (Self::Validating, Self::Validating)
+                | (Self::Ready, Self::Ready)
+                | (Self::Published, Self::Published)
+                | (Self::Failed, Self::Failed)
+                | (Self::Cancelled, Self::Cancelled)
+                | (Self::Building, Self::Validating)
+                | (Self::Validating, Self::Ready)
+                | (Self::Building, Self::Failed)
+                | (Self::Building, Self::Cancelled)
+                | (Self::Validating, Self::Failed)
+                | (Self::Validating, Self::Cancelled)
+                | (Self::Ready, Self::Failed)
+                | (Self::Ready, Self::Cancelled)
+                | (Self::Ready, Self::Published)
+        )
+    }
+}
+
+/// One logical [`IndexVersion`] together with its Phase 3 lifecycle state.
+///
+/// This wrapper keeps the existing `IndexVersion` value contract intact while
+/// adding the lifecycle meaning required by Phase 3. It does not own an
+/// active-version registry, candidate collection, publication coordinator,
+/// update journal, synchronization primitive, storage provider, or runtime
+/// context. Those concerns remain outside this value-level model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexVersionState {
+    version: IndexVersion,
+    lifecycle: VersionLifecycle,
+}
+
+impl IndexVersionState {
+    /// Wraps a logical version as a newly constructed candidate.
+    #[must_use]
+    pub fn new(version: IndexVersion) -> Self {
+        Self {
+            version,
+            lifecycle: VersionLifecycle::Building,
+        }
+    }
+
+    /// Returns the underlying logical index version.
+    #[must_use]
+    pub fn version(&self) -> &IndexVersion {
+        &self.version
+    }
+
+    /// Returns the logical version identifier.
+    #[must_use]
+    pub fn id(&self) -> &IndexVersionId {
+        self.version.id()
+    }
+
+    /// Returns the current Indexing lifecycle state.
+    #[must_use]
+    pub const fn lifecycle(&self) -> VersionLifecycle {
+        self.lifecycle
+    }
+
+    /// Returns whether this version is still an unpublished candidate.
+    #[must_use]
+    pub const fn is_candidate(&self) -> bool {
+        self.lifecycle.is_candidate()
+    }
+
+    /// Returns whether this version has crossed the publication boundary.
+    #[must_use]
+    pub const fn is_published(&self) -> bool {
+        self.lifecycle.is_published()
+    }
+
+    /// Advances the version through one valid Phase 3 lifecycle transition.
+    ///
+    /// No transition from `Published`, `Failed`, or `Cancelled` to another
+    /// state is permitted. In particular, a published version cannot be
+    /// turned back into an unpublished candidate by this value model.
+    pub fn transition_to(
+        &mut self,
+        next: VersionLifecycle,
+    ) -> Result<(), VersionLifecycleTransitionError> {
+        let current = self.lifecycle;
+        if !current.can_transition_to(next) {
+            return Err(VersionLifecycleTransitionError::new(
+                self.id().clone(),
+                current,
+                next,
+            ));
+        }
+
+        self.lifecycle = next;
+        Ok(())
+    }
+
+    /// Advances the version to `Ready`.
+    pub fn mark_ready(&mut self) -> Result<(), VersionLifecycleTransitionError> {
+        self.transition_to(VersionLifecycle::Ready)
+    }
+
+    /// Advances the version to `Published`.
+    pub fn mark_published(&mut self) -> Result<(), VersionLifecycleTransitionError> {
+        self.transition_to(VersionLifecycle::Published)
+    }
+
+    /// Marks the version as failed while keeping it unpublished.
+    pub fn mark_failed(&mut self) -> Result<(), VersionLifecycleTransitionError> {
+        self.transition_to(VersionLifecycle::Failed)
+    }
+
+    /// Marks the version as cancelled while keeping it unpublished.
+    pub fn mark_cancelled(&mut self) -> Result<(), VersionLifecycleTransitionError> {
+        self.transition_to(VersionLifecycle::Cancelled)
+    }
+
+    /// Converts the state transition failure into the shared Core error
+    /// contract.
+    ///
+    /// `IndexingResult` intentionally uses Core's `ErrorEvent` as the
+    /// crate-wide error occurrence contract. `ErrorEvent` is a relatively
+    /// large value, so this narrow lint allowance is preferable to changing
+    /// the shared result alias or boxing the error only for this method.
+    #[allow(clippy::result_large_err)]
+    pub fn transition_to_result(
+        &mut self,
+        next: VersionLifecycle,
+        context: ErrorContext,
+    ) -> IndexingResult<()> {
+        self.transition_to(next)
+            .map_err(|error| ErrorEvent::new(error.into_global_error(context)))
+    }
+
+    /// Consumes the lifecycle wrapper and returns the logical version and its
+    /// lifecycle state.
+    #[must_use]
+    pub fn into_parts(self) -> (IndexVersion, VersionLifecycle) {
+        (self.version, self.lifecycle)
+    }
+
+    /// Consumes the wrapper and returns only the logical version.
+    #[must_use]
+    pub fn into_version(self) -> IndexVersion {
+        self.version
+    }
+}
+
 /// Logical version identity and metadata associated with one index state.
 ///
 /// `IndexVersion` deliberately does not model lifecycle state. Later phases
@@ -438,6 +662,92 @@ fn validate_version_value(value: &str) -> Result<(), VersionValueValidationError
 
     Ok(())
 }
+
+/// Error returned when an [`IndexVersionState`] is asked to perform an
+/// illegal lifecycle transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionLifecycleTransitionError {
+    version: IndexVersionId,
+    from: VersionLifecycle,
+    to: VersionLifecycle,
+}
+
+impl VersionLifecycleTransitionError {
+    fn new(version: IndexVersionId, from: VersionLifecycle, to: VersionLifecycle) -> Self {
+        Self { version, from, to }
+    }
+
+    /// Returns the logical version whose lifecycle transition was rejected.
+    #[must_use]
+    pub fn version(&self) -> &IndexVersionId {
+        &self.version
+    }
+
+    /// Returns the lifecycle state before the rejected transition.
+    #[must_use]
+    pub const fn from(&self) -> VersionLifecycle {
+        self.from
+    }
+
+    /// Returns the requested lifecycle state.
+    #[must_use]
+    pub const fn to(&self) -> VersionLifecycle {
+        self.to
+    }
+
+    /// Converts this typed lifecycle failure into the shared Core error
+    /// contract.
+    #[must_use]
+    pub fn into_global_error(self, context: ErrorContext) -> GlobalError {
+        let mut error = GlobalError {
+            code: ErrorCode::new("INDEXING.VERSION.001")
+                .expect("Indexing version error code is statically valid"),
+            owner: ErrorOwner::new("INDEXING").expect("Indexing error owner is statically valid"),
+            version: CoreVersion::new(1, 0, 0),
+            class: ErrorClass::Contract,
+            severity: Severity::Error,
+            retryability: Retryability::NonRetryable,
+            message: format!(
+                "invalid index version lifecycle transition for {}: {:?} -> {:?}",
+                self.version, self.from, self.to
+            ),
+            details: Vec::new(),
+            solution_reference: None,
+            context,
+            cause: None,
+        };
+
+        if let Some(detail) =
+            nizaam_core::error::DiagnosticDetail::new("version", self.version.to_string())
+        {
+            error = error.with_detail(detail);
+        }
+        if let Some(detail) =
+            nizaam_core::error::DiagnosticDetail::new("from", format!("{:?}", self.from))
+        {
+            error = error.with_detail(detail);
+        }
+        if let Some(detail) =
+            nizaam_core::error::DiagnosticDetail::new("to", format!("{:?}", self.to))
+        {
+            error = error.with_detail(detail);
+        }
+
+        error
+    }
+}
+
+impl fmt::Display for VersionLifecycleTransitionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid index version lifecycle transition for {}: {:?} -> {:?}",
+            self.version, self.from, self.to
+        )
+    }
+}
+
+impl std::error::Error for VersionLifecycleTransitionError {}
 
 /// Validation failures for [`IndexVersion`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -640,12 +950,125 @@ mod tests {
     }
 
     #[test]
-    fn does_not_model_lifecycle_state() {
+    fn keeps_logical_index_version_separate_from_phase3_lifecycle() {
         let version = IndexVersion::new(index_version_id("candidate-v1"));
-
-        // A version is metadata, not a state machine. There is intentionally
-        // no active/candidate/ready/published state in this Phase 2 contract.
         assert_eq!(version.id().as_str(), "candidate-v1");
+
+        let state = IndexVersionState::new(version.clone());
+        assert_eq!(state.version(), &version);
+        assert_eq!(state.lifecycle(), VersionLifecycle::Building);
+        assert!(state.is_candidate());
+        assert!(!state.is_published());
+    }
+
+    #[test]
+    fn follows_the_declared_phase3_lifecycle() {
+        let version = IndexVersion::new(index_version_id("index-v1"));
+        let mut state = IndexVersionState::new(version);
+
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("building should transition to validating");
+        assert_eq!(state.lifecycle(), VersionLifecycle::Validating);
+
+        state
+            .mark_ready()
+            .expect("validating should transition to ready");
+        assert_eq!(state.lifecycle(), VersionLifecycle::Ready);
+
+        state
+            .mark_published()
+            .expect("ready should transition to published");
+        assert_eq!(state.lifecycle(), VersionLifecycle::Published);
+        assert!(!state.is_candidate());
+        assert!(state.is_published());
+        assert!(state.lifecycle().is_terminal());
+    }
+
+    #[test]
+    fn failure_and_cancellation_are_terminal_and_unpublished() {
+        let failed_version = IndexVersion::new(index_version_id("failed-v1"));
+        let mut failed = IndexVersionState::new(failed_version);
+
+        failed
+            .mark_failed()
+            .expect("building should be allowed to fail");
+        assert_eq!(failed.lifecycle(), VersionLifecycle::Failed);
+        assert!(failed.is_candidate());
+        assert!(!failed.is_published());
+        assert!(failed.lifecycle().is_terminal());
+
+        let cancelled_version = IndexVersion::new(index_version_id("cancelled-v1"));
+        let mut cancelled = IndexVersionState::new(cancelled_version);
+
+        cancelled
+            .mark_cancelled()
+            .expect("building should be allowed to cancel");
+        assert_eq!(cancelled.lifecycle(), VersionLifecycle::Cancelled);
+        assert!(cancelled.is_candidate());
+        assert!(!cancelled.is_published());
+        assert!(cancelled.lifecycle().is_terminal());
+    }
+
+    #[test]
+    fn invalid_lifecycle_transition_is_rejected() {
+        let version = IndexVersion::new(index_version_id("index-v2"));
+        let mut state = IndexVersionState::new(version);
+
+        let error = state
+            .mark_published()
+            .expect_err("building must not skip validation and ready");
+
+        assert_eq!(error.version().as_str(), "index-v2");
+        assert_eq!(error.from(), VersionLifecycle::Building);
+        assert_eq!(error.to(), VersionLifecycle::Published);
+
+        state.mark_cancelled().expect("building may be cancelled");
+    }
+
+    #[test]
+    fn terminal_published_state_cannot_be_reversed() {
+        let version = IndexVersion::new(index_version_id("index-v3"));
+        let mut state = IndexVersionState::new(version);
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("building should transition to validating");
+        state.mark_ready().expect("ready transition should succeed");
+        state
+            .mark_published()
+            .expect("publish transition should succeed");
+
+        let error = state
+            .mark_ready()
+            .expect_err("published state must not return to ready");
+
+        assert_eq!(error.from(), VersionLifecycle::Published);
+        assert_eq!(error.to(), VersionLifecycle::Ready);
+    }
+
+    #[test]
+    fn lifecycle_error_can_be_adapted_to_core_error() {
+        let version = IndexVersion::new(index_version_id("index-v4"));
+        let mut state = IndexVersionState::new(version);
+
+        let error = state
+            .mark_published()
+            .expect_err("invalid shortcut must produce a typed lifecycle error");
+
+        let context = ErrorContext::new(nizaam_core::operation::OperationContext::new(
+            nizaam_core::operation::Operation::new(
+                nizaam_core::identity::OperationId::new("index-version-test-operation")
+                    .expect("test operation ID should be valid"),
+                nizaam_core::identity::CorrelationId::new("index-version-test-correlation")
+                    .expect("test correlation ID should be valid"),
+            ),
+        ))
+        .from_engine(
+            nizaam_core::identity::EngineId::new("index-version-test-engine")
+                .expect("test engine ID should be valid"),
+        );
+
+        let _global = error.into_global_error(context);
     }
 
     #[test]

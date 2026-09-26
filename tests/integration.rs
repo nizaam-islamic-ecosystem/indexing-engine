@@ -62,6 +62,11 @@ use nizaam_core::contracts::{
 use nizaam_core::identity::{CapabilityId, EngineInstanceId, MessageId};
 use nizaam_core::runtime::{LifecycleState, RequestAdmissionError};
 use nizaam_core::status::Status;
+use nizaam_indexing::build::{
+    BatchError, BatchExecutor, BatchOptions, BuildCandidate, BuildInput, BuildSnapshot,
+    CandidateUpdater, IndexBuilder, IndexMutation, IndexPublisher, IndexRebuilder,
+    PublicationError, RebuildInput, UpdateJournal,
+};
 use nizaam_indexing::identity::{
     IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
 };
@@ -400,20 +405,18 @@ fn phase2_requirement_to_definition_to_entry_to_reference_composes_end_to_end() 
     assert_eq!(definition.schema_version().unwrap().as_str(), "schema-v3");
 
     let key = KeyMaterial::text("bismillah");
-    let index_id =
-        phase2_generated_index_id(
-            definition.namespace(),
-            definition.definition_id(),
-            definition.family(),
-            &key,
-        );
-    let repeated_index_id =
-        phase2_generated_index_id(
-            definition.namespace(),
-            definition.definition_id(),
-            definition.family(),
-            &key,
-        );
+    let index_id = phase2_generated_index_id(
+        definition.namespace(),
+        definition.definition_id(),
+        definition.family(),
+        &key,
+    );
+    let repeated_index_id = phase2_generated_index_id(
+        definition.namespace(),
+        definition.definition_id(),
+        definition.family(),
+        &key,
+    );
     assert_eq!(index_id, repeated_index_id);
     assert_eq!(index_id.as_bytes().len(), 64);
 
@@ -592,4 +595,301 @@ fn phase2_index_identity_and_definition_identity_remain_distinct_in_integration(
 
     // Concrete index identity and logical definition identity coexist as
     // separate Phase 1/Phase 2 concepts.
+}
+fn phase3_definition() -> IndexDefinition {
+    IndexDefinition::new(
+        IndexDefinitionIdentity::new(
+            phase2_definition_id("integration.phase3.definition"),
+            phase2_namespace("integration.phase3"),
+            IndexFamily::Inverted,
+        ),
+        phase2_key_definition(&["term"]),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        Some(phase2_source_version()),
+        Some(phase2_schema_version()),
+    )
+    .expect("phase3 test definition should be valid")
+}
+
+fn phase3_entry(term: &str, object: &str) -> IndexEntry {
+    IndexEntry::new(
+        KeyMaterial::text(term),
+        phase2_reference("documents", object),
+    )
+    .expect("phase3 test entry should be valid")
+}
+
+fn phase3_candidate(index_seed: u8, version: &str, entries: Vec<IndexEntry>) -> BuildCandidate {
+    let definition = phase3_definition();
+
+    IndexBuilder::new()
+        .build(BuildInput::new(
+            phase2_index_id(index_seed),
+            definition,
+            IndexVersionId::new(version).expect("phase3 version ID should be valid"),
+            BuildSnapshot::with_versions(
+                Some(phase2_source_version()),
+                Some(phase2_schema_version()),
+                entries,
+            ),
+        ))
+        .expect("phase3 candidate should build")
+}
+
+#[test]
+fn phase3_build_update_and_explicit_publication_keep_active_state_separate() {
+    let index_id = phase2_index_id(0x90);
+    let base = phase3_candidate(0x90, "index-v1", vec![phase3_entry("alpha", "doc:1")]);
+
+    let updater = CandidateUpdater::new();
+    let mut journal = UpdateJournal::new();
+
+    let update_candidate = updater
+        .create_candidate(
+            &base,
+            IndexVersionId::new("index-v2").expect("candidate version ID should be valid"),
+            None,
+            None,
+        )
+        .expect("update candidate should be created");
+
+    let (updated_candidate, sequence) = updater
+        .apply_and_record(
+            &update_candidate,
+            IndexMutation::Insert(phase3_entry("beta", "doc:2")),
+            &mut journal,
+        )
+        .expect("logical update should succeed");
+
+    assert_eq!(sequence.value(), 1);
+    assert_eq!(journal.current_sequence().value(), 1);
+    assert_eq!(journal.len(), 1);
+
+    // The previously built candidate remains unchanged and no publication
+    // occurs merely because an update was accepted.
+    assert_eq!(base.len(), 1);
+    assert_eq!(update_candidate.len(), 1);
+    assert_eq!(updated_candidate.len(), 2);
+
+    let publisher = IndexPublisher::new();
+    let prepared = publisher
+        .prepare(
+            updated_candidate.clone(),
+            &phase3_definition(),
+            Some(base.version().id().clone()),
+            Some(base.version().id().clone()),
+        )
+        .expect("updated candidate should be publication-eligible");
+
+    let published = publisher
+        .publish(prepared, Some(base.clone()))
+        .expect("explicit publication should succeed");
+
+    assert_eq!(published.active().index_id(), &index_id);
+    assert_eq!(published.active().version().id().as_str(), "index-v2");
+    assert_eq!(
+        published
+            .previous_active()
+            .expect("previous active should be preserved")
+            .version()
+            .id()
+            .as_str(),
+        "index-v1"
+    );
+}
+
+#[test]
+fn phase3_bounded_batch_commits_complete_chunks_without_partial_success() {
+    let base = phase3_candidate(0x91, "index-v1", vec![phase3_entry("base", "doc:0")]);
+    let journal = UpdateJournal::new();
+
+    let mutations = vec![
+        IndexMutation::Insert(phase3_entry("alpha", "doc:1")),
+        IndexMutation::Insert(phase3_entry("beta", "doc:2")),
+        IndexMutation::Insert(phase3_entry("gamma", "doc:3")),
+    ];
+
+    let result = BatchExecutor::new()
+        .execute(
+            &base,
+            &journal,
+            mutations,
+            BatchOptions::new(2).expect("chunk size should be valid"),
+        )
+        .expect("all bounded chunks should succeed");
+
+    assert_eq!(result.completed_chunks(), 2);
+    assert_eq!(result.applied_mutations(), 3);
+    assert_eq!(result.candidate().len(), 4);
+    assert_eq!(result.journal().len(), 3);
+    assert_eq!(result.journal().current_sequence().value(), 3);
+
+    // Batch execution only produces another candidate; publication remains
+    // outside this boundary.
+    assert_eq!(base.len(), 1);
+}
+
+#[test]
+fn phase3_failed_batch_chunk_preserves_the_previously_committed_prefix() {
+    let base = phase3_candidate(0x92, "index-v1", vec![phase3_entry("base", "doc:0")]);
+    let journal = UpdateJournal::new();
+    let duplicated = phase3_entry("duplicate", "doc:1");
+
+    let result = BatchExecutor::new().execute(
+        &base,
+        &journal,
+        vec![
+            IndexMutation::Insert(phase3_entry("alpha", "doc:1")),
+            IndexMutation::Insert(phase3_entry("beta", "doc:2")),
+            IndexMutation::Insert(duplicated.clone()),
+            IndexMutation::Insert(duplicated),
+        ],
+        BatchOptions::new(2).expect("chunk size should be valid"),
+    );
+
+    let error = result.expect_err("the second chunk should fail transactionally");
+
+    match error {
+        BatchError::ChunkFailed {
+            chunk_index,
+            committed,
+            ..
+        } => {
+            assert_eq!(chunk_index, 1);
+            assert_eq!(committed.completed_chunks(), 1);
+            assert_eq!(committed.applied_mutations(), 2);
+            assert_eq!(committed.candidate().len(), 3);
+            assert_eq!(committed.journal().len(), 2);
+        }
+        other => panic!("unexpected batch error: {other:?}"),
+    }
+
+    assert_eq!(base.len(), 1);
+}
+
+#[test]
+fn phase3_rebuild_replays_post_snapshot_updates_before_publication() {
+    let active = phase3_candidate(0x93, "index-v1", vec![phase3_entry("base", "doc:0")]);
+    let index_id = *active.index_id();
+    let active_version = active.version().id().clone();
+
+    let mut journal = UpdateJournal::new();
+    let rebuilder = IndexRebuilder::new();
+
+    let snapshot = BuildSnapshot::with_versions(
+        Some(phase2_source_version()),
+        Some(phase2_schema_version()),
+        vec![phase3_entry("base", "doc:0")],
+    );
+
+    let input = RebuildInput::new(
+        index_id,
+        phase3_definition(),
+        IndexVersionId::new("index-v2").expect("candidate version ID should be valid"),
+        snapshot,
+        Some(active_version.clone()),
+        Some(active_version.clone()),
+    );
+
+    let progress = rebuilder
+        .start(input, &journal)
+        .expect("rebuild should start from the source snapshot");
+
+    assert_eq!(progress.captured_sequence().value(), 0);
+    assert_eq!(progress.replayed_updates(), 0);
+    assert_eq!(progress.candidate().len(), 1);
+
+    journal
+        .append(IndexMutation::Insert(phase3_entry("alpha", "doc:1")))
+        .expect("journal append should succeed");
+    journal
+        .append(IndexMutation::Insert(phase3_entry("beta", "doc:2")))
+        .expect("journal append should succeed");
+    journal
+        .append(IndexMutation::Insert(phase3_entry("gamma", "doc:3")))
+        .expect("journal append should succeed");
+
+    let progress = rebuilder
+        .replay(&progress, &journal)
+        .expect("all post-snapshot updates should replay");
+
+    assert_eq!(progress.captured_sequence().value(), 0);
+    assert_eq!(progress.replayed_through().value(), 3);
+    assert_eq!(progress.replayed_updates(), 3);
+    assert!(rebuilder.is_caught_up(&progress, &journal));
+
+    let rebuilt = rebuilder
+        .finish(&progress, &journal)
+        .expect("caught-up rebuild should finish");
+    assert_eq!(rebuilt.candidate().len(), 4);
+    assert_eq!(rebuilt.replayed_updates(), 3);
+
+    let publisher = IndexPublisher::new();
+    let prepared = publisher
+        .prepare(
+            rebuilt.candidate().clone(),
+            &phase3_definition(),
+            Some(active_version.clone()),
+            Some(active_version.clone()),
+        )
+        .expect("rebuilt candidate should be publication-eligible");
+
+    let published = publisher
+        .publish(prepared, Some(active.clone()))
+        .expect("explicit publication should succeed");
+
+    assert_eq!(published.active().version().id().as_str(), "index-v2");
+    assert_eq!(
+        published
+            .previous_active()
+            .expect("previous active should be preserved")
+            .version()
+            .id()
+            .as_str(),
+        "index-v1"
+    );
+}
+
+#[test]
+fn phase3_stale_prepared_candidate_cannot_overwrite_a_newer_active_version() {
+    let active_v1 = phase3_candidate(0x94, "index-v1", vec![phase3_entry("base", "doc:0")]);
+    let candidate_v2 = phase3_candidate(0x94, "index-v2", vec![phase3_entry("v2", "doc:2")]);
+    let candidate_v3 = phase3_candidate(0x94, "index-v3", vec![phase3_entry("v3", "doc:3")]);
+
+    let publisher = IndexPublisher::new();
+    let definition = phase3_definition();
+
+    let prepared_v2 = publisher
+        .prepare(
+            candidate_v2,
+            &definition,
+            Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
+            Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
+        )
+        .expect("v2 should be prepared against v1");
+
+    let prepared_v3 = publisher
+        .prepare(
+            candidate_v3,
+            &definition,
+            Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
+            Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
+        )
+        .expect("v3 should be prepared against v1");
+
+    let published_v3 = publisher
+        .publish(prepared_v3, Some(active_v1.clone()))
+        .expect("v3 should publish against the original active version");
+
+    let error = publisher
+        .publish(prepared_v2, Some(published_v3.active().clone()))
+        .expect_err("stale prepared v2 must not overwrite v3");
+
+    assert!(matches!(
+        error,
+        PublicationError::ActiveVersionChanged { .. }
+    ));
+    assert_eq!(published_v3.active().version().id().as_str(), "index-v3");
 }
