@@ -9633,7 +9633,7 @@ That is what makes Phase 3 fundamentally different from Phase 2. Phase 2 defined
 
 #### Status
 
-**In Progress**
+**Completed**
 
 ##### 1. Phase 4 Goal
 
@@ -11416,71 +11416,71 @@ The implementation should preserve the logical contracts while the internal prov
 
 The following invariants should hold after Phase 4:
 
-- [ ] Queries are expressed through generic logical requirements.
+- [x] Queries are expressed through generic logical requirements.
 
-- [ ] Exact lookup is supported.
+- [x] Exact lookup is supported.
 
-- [ ] Inverted/text lookup is supported.
+- [x] Inverted/text lookup is supported.
 
-- [ ] Structured record lookup is supported.
+- [x] Structured record lookup is supported.
 
-- [ ] Neighborhood lookup is supported.
+- [x] Neighborhood lookup is supported.
 
-- [ ] Similarity lookup is supported.
+- [x] Similarity lookup is supported.
 
-- [ ] Filtered lookup is supported.
+- [x] Filtered lookup is supported.
 
-- [ ] Hybrid retrieval is supported.
+- [x] Hybrid retrieval is supported.
 
-- [ ] Index selection is performed locally by Indexing.
+- [x] Index selection is performed locally by Indexing.
 
-- [ ] Query planning remains provider-neutral at the public contract boundary.
+- [x] Query planning remains provider-neutral at the public contract boundary.
 
-- [ ] Physical provider selection may occur internally behind the planner/provider boundary.
+- [x] Physical provider selection may occur internally behind the planner/provider boundary.
 
-- [ ] Physical algorithms are not exposed through the logical query contract.
+- [x] Physical algorithms are not exposed through the logical query contract.
 
-- [ ] Fresh/current query behavior is defined.
+- [x] Fresh/current query behavior is defined.
 
-- [ ] Version-aware query behavior is defined.
+- [x] Version-aware query behavior is defined.
 
-- [ ] Stale-index behavior is defined.
+- [x] Stale-index behavior is defined.
 
-- [ ] Consistency requirements are enforced.
+- [x] Consistency requirements are enforced.
 
-- [ ] Source/index synchronization is explicitly considered.
+- [x] Source/index synchronization is explicitly considered.
 
-- [ ] Query capability negotiation is supported.
+- [x] Query capability negotiation is supported.
 
-- [ ] Unsupported queries do not silently become different queries.
+- [x] Unsupported queries do not silently become different queries.
 
-- [ ] Results are reference-oriented.
+- [x] Results are reference-oriented.
 
-- [ ] Source-owned domain objects are not hydrated by Indexing.
+- [x] Source-owned domain objects are not hydrated by Indexing.
 
-- [ ] Relationship records remain semantically owned by the source engine.
+- [x] Relationship records remain semantically owned by the source engine.
 
-- [ ] Indexing does not interpret relationship meaning.
+- [x] Indexing does not interpret relationship meaning.
 
-- [ ] Core runtime and capability dispatch are reused.
+- [x] Core runtime and capability dispatch are reused.
 
-- [ ] Core cancellation and deadline mechanisms are reused.
+- [x] Core cancellation and deadline mechanisms are reused.
 
-- [ ] Provider failures remain distinguishable from empty results.
+- [x] Provider failures remain distinguishable from empty results.
 
-- [ ] Unpublished candidate versions are not exposed to normal queries.
+- [x] Unpublished candidate versions are not exposed to normal queries.
 
-- [ ] Queries observe only valid queryable index state.
+- [x] Queries observe only valid queryable index state.
 
-- [ ] Phase 3 publication guarantees remain intact.
+- [x] Phase 3 publication guarantees remain intact.
 
-- [ ] No second Control Plane is introduced.
+- [x] No second Control Plane is introduced.
 
-- [ ] No semantic query engine is introduced.
+- [x] No semantic query engine is introduced.
 
-- [ ] No physical storage technology becomes part of the logical contract.
+- [x] No physical storage technology becomes part of the logical contract.
 
-- [ ] Phase 1–3 behavior remains intact.
+- [x] Phase 1–3 behavior remains intact.
 
 ---
 
@@ -11488,72 +11488,264 @@ The following invariants should hold after Phase 4:
 
 Phase 4 is complete when:
 
+#### 47. What Was Done in Phase 4
+
+Phase 4 has been implemented as the Indexing Engine's generic query/retrieval layer while preserving the ownership boundaries established by Core and Phases 1–3.
+
+The completed implementation includes:
+
+```text
+1. Canonical logical query contracts
+   - QueryRequest
+   - AtomicQuery
+   - HybridQueryComponent
+   - QueryKind
+   - ResultMode
+   - Exact, text/inverted, structured, neighborhood, similarity,
+     filtered, and hybrid query shapes
+   - logical selection hints, limits, consistency requirements,
+     result representation, and opaque metadata
+
+2. Reference-oriented query results
+   - QueryHit
+   - QueryResult
+   - optional generic score/distance/metadata
+   - opaque continuation support
+   - query-time consistency metadata
+   - structural result/metadata validation
+   - no source-domain object hydration
+
+3. Query-time consistency
+   - Current
+   - VersionPinned(IndexVersionId)
+   - StaleAllowed(FreshnessPolicy)
+   - mandatory UpdateSequence freshness dimension
+   - optional time-lag constraint
+   - optional source-version compatibility constraint
+   - conjunctive evaluation of all declared freshness constraints
+   - explicit rejection of missing required observations
+   - explicit rejection when indexed UpdateSequence is ahead of source state
+
+4. Source/index synchronization
+   - query-time synchronization snapshots
+   - source/index UpdateSequence observations
+   - derived UpdateSequence lag
+   - optional time lag
+   - opaque source-version observations
+   - selected IndexVersion source-version metadata treated as authoritative
+   - conflicting indexed-source-version observations rejected
+
+5. Index-local query planning
+   - caller-supplied IndexCandidate inputs
+   - logical IndexDefinition selection
+   - queryable IndexVersion selection
+   - logical selection hints for namespace, definition, and family
+   - consistency-aware candidate evaluation
+   - deterministic stale-version selection by observed freshness lag
+   - explicit ambiguity rejection for non-uniquely identifiable current/pinned targets
+   - no global active-version registry
+   - no use of Core global routing as a local query planner
+
+6. Provider capability boundary
+   - exact lookup
+   - text/inverted lookup
+   - structured lookup
+   - neighborhood lookup
+   - similarity lookup
+   - filtered lookup
+   - hybrid retrieval
+   - generic provider-side ranking
+   - provider availability state
+   - capability advertisement and negotiation without physical algorithm leakage
+
+7. Provider-side ranking
+   - generic score, distance, and ordering-key ranking
+   - deterministic reference tie-breaking
+   - validation of non-finite ranking metrics
+   - preservation of opaque reference-oriented candidate metadata
+   - no domain-specific relevance or semantic ranking policy
+
+8. Retrieval execution
+   - logical RetrievalPlan execution through ProviderRetriever
+   - execution-time provider availability re-check
+   - execution-time capability re-check
+   - exact/text/structured/neighborhood/similarity/filtered dispatch
+   - provider-native hybrid dispatch
+   - composed hybrid component execution in declared order
+   - provider errors preserved instead of becoming empty results
+   - Core OperationContext forwarded unchanged
+   - no Indexing-owned replacement cancellation/deadline system
+
+9. Hybrid result handling
+   - heterogeneous index/version targets rejected before physical execution when
+     they cannot be represented by the generic QueryResult contract
+   - duplicate references deduplicated before applying the logical result limit
+   - first-occurrence component order preserved
+   - optional generic hit fields merged only when absent
+   - no cross-component ranking or semantic interpretation
+
+10. Phase 2/3 compatibility and public boundaries
+    - canonical Phase 4 query types exposed through query/mod.rs
+    - Phase 2 index/query compatibility facade retained without a duplicate
+      canonical query implementation
+    - Phase 3 IndexVersion/VersionLifecycle/publication guarantees consumed
+      rather than replaced
+    - existing Core runtime, capability, lifecycle, context, and admission
+      boundaries preserved
+
+11. Phase 4 test coverage
+    - query construction and planner integration
+    - consistency and synchronization behavior
+    - end-to-end query/retrieval integration
+    - architectural conformance
+    - provider/consistency fault injection
+    - concurrent/stress retrieval and planning scenarios
+```
+
+The implementation remains provider-neutral at the public logical contract boundary, keeps physical retrieval behind the provider boundary, preserves source/domain ownership of semantics, and keeps Core responsible for universal runtime execution infrastructure.
+
 #### Verification Checklist
 
-- [ ] Logical query requests can be expressed against source-owned
+- [x] Logical query requests can be expressed against source-owned
   index requirements.
 
-- [ ] Compatible IndexDefinitions can be selected.
+- [x] Compatible IndexDefinitions can be selected.
 
-- [ ] Compatible IndexVersions can be selected according to
+- [x] Compatible IndexVersions can be selected according to
   declared consistency requirements.
 
-- [ ] Exact lookup works.
+- [x] Exact lookup works.
 
-- [ ] Inverted/text lookup works.
+- [x] Inverted/text lookup works.
 
-- [ ] Structured record lookup works.
+- [x] Structured record lookup works.
 
-- [ ] Neighborhood lookup works.
+- [x] Neighborhood lookup works.
 
-- [ ] Similarity lookup works.
+- [x] Similarity lookup works.
 
-- [ ] Filtered lookup works.
+- [x] Filtered lookup works.
 
-- [ ] Hybrid retrieval works.
+- [x] Hybrid retrieval works.
 
-- [ ] Fresh/current queries behave according to the declared
+- [x] Fresh/current queries behave according to the declared
   consistency model.
 
-- [ ] Version-aware queries work.
+- [x] Version-aware queries work.
 
-- [ ] Stale-index behavior is explicit and deterministic.
+- [x] Stale-index behavior is explicit and deterministic.
 
-- [ ] Consistency requirements are enforced.
+- [x] Consistency requirements are enforced.
 
-- [ ] Source/index synchronization requirements are enforced.
+- [x] Source/index synchronization requirements are enforced.
 
-- [ ] Query capability negotiation works.
+- [x] Query capability negotiation works.
 
-- [ ] Unsupported or incompatible queries return defined outcomes.
+- [x] Unsupported or incompatible queries return defined outcomes.
 
-- [ ] Reference-only results are returned.
+- [x] Reference-only results are returned.
 
-- [ ] Source-domain objects are not hydrated by Indexing.
+- [x] Source-domain objects are not hydrated by Indexing.
 
-- [ ] Relationship meaning remains outside Indexing.
+- [x] Relationship meaning remains outside Indexing.
 
-- [ ] Physical algorithms do not leak into the logical contract.
+- [x] Physical algorithms do not leak into the logical contract.
 
-- [ ] Provider failures are handled through the defined error boundary.
+- [x] Provider failures are handled through the defined error boundary.
 
-- [ ] Query cancellation uses Core cancellation infrastructure.
+- [x] Query cancellation uses Core cancellation infrastructure.
 
-- [ ] Query deadlines use Core deadline infrastructure.
+- [x] Query deadlines use Core deadline infrastructure.
 
-- [ ] Queries cannot observe invalid or unpublished candidate state.
+- [x] Queries cannot observe invalid or unpublished candidate state.
 
-- [ ] Queries remain safe during rebuild and publication.
+- [x] Queries remain safe during rebuild and publication.
 
-- [ ] Integration tests cover end-to-end query/retrieval workflows.
+- [x] Integration tests cover end-to-end query/retrieval workflows.
 
-- [ ] Conformance tests protect architecture boundaries.
+- [x] Conformance tests protect architecture boundaries.
 
-- [ ] Fault-injection tests cover provider and consistency failures.
+- [x] Fault-injection tests cover provider and consistency failures.
 
-- [ ] Stress tests cover concurrent query/update/rebuild conditions.
+- [x] Stress tests cover concurrent query/update/rebuild conditions.
 
-- [ ] Previously verified Phase 1, Phase 2, and Phase 3 behavior remains intact.
+- [x] The three query-time consistency modes are implemented as
+  explicit `Current`, `VersionPinned`, and `StaleAllowed` policies.
+
+- [x] `Current` requires both source/index UpdateSequence observations and
+  zero UpdateSequence lag.
+
+- [x] `VersionPinned` requires the exact requested IndexVersion and does not
+  fall back to another published version.
+
+- [x] `FreshnessPolicy` uses UpdateSequence lag as the mandatory freshness
+  dimension and combines optional time-lag and source-version constraints
+  conjunctively.
+
+- [x] Freshness evaluation derives UpdateSequence lag from the source and
+  indexed observations and rejects an indexed sequence that is ahead of the
+  source sequence.
+
+- [x] Source-version compatibility is equality-based and does not interpret
+  opaque source-version ordering; selected IndexVersion metadata remains
+  authoritative for the indexed source version.
+
+- [x] The planner consumes caller-supplied candidates instead of creating a
+  global active-version registry.
+
+- [x] Ambiguous current or pinned candidate selection is rejected instead of
+  being resolved by an arbitrary version identifier tie-break.
+
+- [x] Stale-allowed candidate selection prefers the lowest acceptable observed
+  UpdateSequence lag.
+
+- [x] The shared provider boundary advertises all Phase 4 logical retrieval
+  capabilities plus generic ranking without exposing physical technology.
+
+- [x] Generic provider-side ranking supports score, distance, and ordering-key
+  criteria with deterministic generic tie-breaking and candidate validation.
+
+- [x] Similarity retrieval requires generic provider ranking capability, and
+  filtered similarity preserves that ranking requirement.
+
+- [x] Provider availability and capability support are rechecked at retrieval
+  execution time before physical provider calls.
+
+- [x] Provider-native hybrid retrieval is used when the native capability is
+  available, with composed component retrieval used when native hybrid support
+  is unavailable but the required component capabilities exist.
+
+- [x] Composed hybrid retrieval preserves declared component order and
+  deduplicates repeated references before applying the logical result limit.
+
+- [x] Composed hybrid retrieval does not perform cross-component ranking or
+  interpret score/distance values semantically.
+
+- [x] Heterogeneous hybrid index/version targets are rejected before provider
+  execution when their provenance cannot be represented by the generic
+  single-target QueryResult contract.
+
+- [x] `ResultMode::ReferencesOnly` and
+  `ResultMode::ReferencesWithMetadata` explicitly control whether optional
+  generic retrieval metadata is preserved while results remain reference-only.
+
+- [x] Query results can carry factual consistency metadata including mode,
+  state, source/index UpdateSequences, derived lag, indexed source version,
+  and optional time lag.
+
+- [x] A successful empty provider result remains distinguishable from a
+  provider failure.
+
+- [x] The existing Phase 2 query API remains available through a compatibility
+  facade while Phase 4 owns one canonical query implementation.
+
+- [x] Opaque query continuation remains supported without introducing a
+  pagination algorithm into the logical result contract.
+
+- [x] Retrieval converts provider ranking candidates into canonical QueryHits
+  at the Indexing result boundary without hydrating source-domain objects.
+
+- [x] Previously verified Phase 1, Phase 2, and Phase 3 behavior remains intact.
 
 ---
 
@@ -11697,7 +11889,7 @@ That gives the Indexing Engine a clean generic retrieval layer that can serve mu
 
 #### Status
 
-**Not Started**
+**In Progress**
 
 #### Approved Cross-Phase Architecture Update
 
@@ -15891,24 +16083,3 @@ The semantic tests/mapping.rs test target is intentionally absent.
 The presence of a retained file or folder in this scaffold does not mean
 that its phase is implemented. It identifies the intended implementation
 location for the phase mapping above.
-
-## Current State
-
-Architecture is established sufficiently to begin implementation.
-
-The next implementation work should begin with Phase 0: Engine
-Workspace & Integration Foundation, followed by the identity/namespace
-/index-space model.
-
-The current repository has both a library crate and standalone binary
-entry points. Their final binary-target arrangement should be deliberately
-confirmed before the package contract is frozen.
-
-The Indexing Engine is explicitly scoped as a generic indexing
-infrastructure engine. It assigns, stores, maintains, and retrieves
-indexes for source-owned objects and records. Semantic mappings and their
-meanings remain outside the Indexing Engine.
-
-The existing mapping/ module, index/relationship.rs, and
-tests/mapping.rs are no longer part of the target architecture because
-they make semantic mapping ownership appear inside Indexing.
