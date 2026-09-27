@@ -325,3 +325,523 @@ fn publication_fault_preserves_the_newer_active_candidate() {
     ));
     assert_eq!(active_v3.version().id().as_str(), "index-v3");
 }
+
+// -----------------------------------------------------------------------------
+// Phase 4 fault-injection coverage
+// -----------------------------------------------------------------------------
+
+use std::fmt::{Display, Formatter};
+use std::sync::{Arc, Mutex};
+
+use nizaam_indexing::consistency::{ConsistencyMode, FreshnessPolicy, SynchronizationSnapshot};
+use nizaam_indexing::provider::{
+    ProviderAvailability, ProviderCapabilities, ProviderCapability, RankingCandidate,
+};
+use nizaam_indexing::query::{
+    AtomicQuery, ExactRetrievalPlan, FilteredRetrievalPlan, HybridQueryComponent,
+    HybridRetrievalPlan, IndexCandidate, NeighborhoodRetrievalPlan, PlannedHybridComponent,
+    ProviderRetriever, QueryKind, QueryRequest, ResultMode, RetrievalError,
+    SimilarityRetrievalPlan, StructuredRetrievalPlan, TextRetrievalPlan, execute, plan_query,
+};
+
+fn phase4_fault_candidate(
+    seed: u8,
+    definition_name: &str,
+    version: &str,
+    source_sequence: u64,
+    indexed_sequence: u64,
+    lifecycle: VersionLifecycle,
+) -> IndexCandidate {
+    let definition = IndexDefinition::new(
+        IndexDefinitionIdentity::new(
+            IndexDefinitionId::new(definition_name).expect("definition ID should be valid"),
+            IndexNamespace::new("phase4.faults").expect("namespace should be valid"),
+            IndexFamily::Identity,
+        ),
+        KeyDefinition::new(["value"]).expect("key definition should be valid"),
+        TargetReferenceType::new("documents.document")
+            .expect("target reference type should be valid"),
+        Uniqueness::NonUnique,
+        ConsistencyRequirement::new("logical-v1").expect("consistency requirement should be valid"),
+        Some(source_version("source-v1")),
+        Some(schema_version("schema-v1")),
+    )
+    .expect("fault-injection definition should be valid");
+
+    let version = nizaam_indexing::index::IndexVersion::with_metadata(
+        version_id(version),
+        Some(source_version("source-v1")),
+        Some(schema_version("schema-v1")),
+        None,
+    )
+    .expect("version should be valid");
+    let mut state = IndexVersionState::new(version);
+    if lifecycle != VersionLifecycle::Building {
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("version should enter validation");
+        state.mark_ready().expect("version should become ready");
+    }
+    if lifecycle == VersionLifecycle::Published {
+        state
+            .mark_published()
+            .expect("version should become published");
+    }
+
+    let synchronization = SynchronizationSnapshot::from_sequences(
+        nizaam_indexing::build::UpdateSequence::new(source_sequence),
+        nizaam_indexing::build::UpdateSequence::new(indexed_sequence),
+    )
+    .expect("synchronization should be valid");
+
+    IndexCandidate::new(index_id(seed), definition, state, synchronization)
+}
+
+fn fault_operation_context() -> nizaam_core::operation::OperationContext {
+    nizaam_core::operation::OperationContext::new(nizaam_core::operation::Operation::new(
+        nizaam_core::identity::OperationId::new("phase4-fault-operation")
+            .expect("operation ID should be valid"),
+        nizaam_core::identity::CorrelationId::new("phase4-fault-correlation")
+            .expect("correlation ID should be valid"),
+    ))
+}
+
+#[derive(Clone, Debug)]
+struct FaultProvider {
+    capabilities: ProviderCapabilities,
+    availability: ProviderAvailability,
+    fail: bool,
+    calls: Arc<Mutex<usize>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FaultProviderError(&'static str);
+
+impl Display for FaultProviderError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for FaultProviderError {}
+
+impl FaultProvider {
+    fn new(
+        capabilities: ProviderCapabilities,
+        availability: ProviderAvailability,
+        fail: bool,
+    ) -> Self {
+        Self {
+            capabilities,
+            availability,
+            fail,
+            calls: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn result(&self) -> Result<Vec<RankingCandidate>, FaultProviderError> {
+        *self
+            .calls
+            .lock()
+            .expect("call counter mutex should be valid") += 1;
+        if self.fail {
+            return Err(FaultProviderError("injected provider failure"));
+        }
+
+        Ok(vec![RankingCandidate::new(
+            ObjectReference::new("documents", "doc:1").expect("test reference should be valid"),
+        )])
+    }
+}
+
+impl ProviderRetriever for FaultProvider {
+    type Error = FaultProviderError;
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        self.availability
+    }
+
+    fn retrieve_exact(
+        &self,
+        _plan: &ExactRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+
+    fn retrieve_text(
+        &self,
+        _plan: &TextRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+
+    fn retrieve_structured(
+        &self,
+        _plan: &StructuredRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+
+    fn retrieve_neighborhood(
+        &self,
+        _plan: &NeighborhoodRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+
+    fn retrieve_similarity(
+        &self,
+        _plan: &SimilarityRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+
+    fn retrieve_filtered(
+        &self,
+        _plan: &FilteredRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+
+    fn retrieve_hybrid(
+        &self,
+        _plan: &HybridRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+
+    fn retrieve_hybrid_component(
+        &self,
+        _component: &PlannedHybridComponent,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.result()
+    }
+}
+
+#[test]
+fn phase4_provider_failure_is_preserved_and_is_not_converted_into_an_empty_result() {
+    let candidate = phase4_fault_candidate(
+        0xa1,
+        "phase4.faults.provider",
+        "published-v1",
+        10,
+        10,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
+        .expect("request should be valid");
+    let provider = FaultProvider::new(
+        ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+        true,
+    );
+    let plan = plan_query(
+        &request,
+        vec![candidate],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("planning should succeed before the injected execution fault");
+
+    let error = execute(&plan, &provider, &fault_operation_context())
+        .expect_err("provider failure must propagate as an execution error");
+
+    assert!(matches!(
+        error,
+        RetrievalError::Provider(FaultProviderError("injected provider failure"))
+    ));
+}
+
+#[test]
+fn phase4_execution_rechecks_provider_availability_and_rejects_unavailable_provider() {
+    let candidate = phase4_fault_candidate(
+        0xa2,
+        "phase4.faults.availability",
+        "published-v1",
+        11,
+        11,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
+        .expect("request should be valid");
+    let planning_capabilities = ProviderCapabilities::with(ProviderCapability::ExactLookup);
+    let plan = plan_query(
+        &request,
+        vec![candidate],
+        &planning_capabilities,
+        ProviderAvailability::Available,
+    )
+    .expect("planning should succeed while provider is available");
+
+    let provider = FaultProvider::new(
+        planning_capabilities,
+        ProviderAvailability::TemporarilyUnavailable,
+        false,
+    );
+    let error = execute(&plan, &provider, &fault_operation_context())
+        .expect_err("execution-time provider unavailability must be detected");
+
+    assert!(matches!(
+        error,
+        RetrievalError::ProviderUnavailable {
+            availability: ProviderAvailability::TemporarilyUnavailable
+        }
+    ));
+}
+
+#[test]
+fn phase4_execution_rechecks_capability_and_rejects_missing_provider_support() {
+    let candidate = phase4_fault_candidate(
+        0xa3,
+        "phase4.faults.capability",
+        "published-v1",
+        12,
+        12,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
+        .expect("request should be valid");
+    let planning_capabilities = ProviderCapabilities::with(ProviderCapability::ExactLookup);
+    let plan = plan_query(
+        &request,
+        vec![candidate],
+        &planning_capabilities,
+        ProviderAvailability::Available,
+    )
+    .expect("planning should succeed with advertised capability");
+
+    let provider = FaultProvider::new(
+        ProviderCapabilities::new(),
+        ProviderAvailability::Available,
+        false,
+    );
+    let error = execute(&plan, &provider, &fault_operation_context())
+        .expect_err("execution must reject a capability that disappeared");
+
+    assert!(matches!(
+        error,
+        RetrievalError::MissingProviderCapability(_)
+    ));
+}
+
+#[test]
+fn phase4_consistency_failure_stops_planning_before_provider_execution() {
+    let candidate = phase4_fault_candidate(
+        0xa4,
+        "phase4.faults.consistency",
+        "published-v1",
+        20,
+        17,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::with_spec(
+        *candidate.index_id(),
+        None,
+        None,
+        None,
+        QueryKind::Exact {
+            key: KeyMaterial::text("term"),
+        },
+        None,
+        ConsistencyMode::Current,
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("request should be valid");
+
+    let error = plan_query(
+        &request,
+        vec![candidate],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    )
+    .expect_err("positive freshness lag must fail Current planning");
+
+    assert!(matches!(
+        error,
+        nizaam_indexing::query::QueryPlanningError::ConsistencyUnsatisfied { .. }
+    ));
+}
+
+#[test]
+fn phase4_pinned_version_mismatch_is_a_failure_and_does_not_substitute_another_version() {
+    let candidate = phase4_fault_candidate(
+        0xa5,
+        "phase4.faults.pinned",
+        "published-v2",
+        30,
+        30,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::with_spec(
+        *candidate.index_id(),
+        None,
+        None,
+        None,
+        QueryKind::Exact {
+            key: KeyMaterial::text("term"),
+        },
+        None,
+        ConsistencyMode::VersionPinned(
+            IndexVersionId::new("published-v1").expect("version ID should be valid"),
+        ),
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("request should be valid");
+
+    let error = plan_query(
+        &request,
+        vec![candidate],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    )
+    .expect_err("a different version must not satisfy a pinned request");
+
+    assert!(matches!(
+        error,
+        nizaam_indexing::query::QueryPlanningError::ConsistencyUnsatisfied { .. }
+    ));
+}
+
+#[test]
+fn phase4_unpublished_candidate_cannot_be_reached_by_provider_execution() {
+    let candidate = phase4_fault_candidate(
+        0xa6,
+        "phase4.faults.unpublished",
+        "candidate-v1",
+        40,
+        40,
+        VersionLifecycle::Ready,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
+        .expect("request should be valid");
+
+    let result = plan_query(
+        &request,
+        vec![candidate],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    );
+
+    assert!(matches!(
+        result,
+        Err(nizaam_indexing::query::QueryPlanningError::ConsistencyUnsatisfied { .. })
+    ));
+}
+
+#[test]
+fn phase4_stale_allowed_rejects_lag_beyond_the_declared_freshness_bound() {
+    let candidate = phase4_fault_candidate(
+        0xa7,
+        "phase4.faults.stale",
+        "published-v1",
+        50,
+        46,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::with_spec(
+        *candidate.index_id(),
+        None,
+        None,
+        None,
+        QueryKind::Text {
+            query: KeyMaterial::text("term"),
+            parameters: None,
+        },
+        None,
+        ConsistencyMode::StaleAllowed(FreshnessPolicy::new(2)),
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("request should be valid");
+
+    let error = plan_query(
+        &request,
+        vec![candidate],
+        &ProviderCapabilities::with(ProviderCapability::TextLookup),
+        ProviderAvailability::Available,
+    )
+    .expect_err("lag beyond the declared policy must fail planning");
+
+    assert!(matches!(
+        error,
+        nizaam_indexing::query::QueryPlanningError::ConsistencyUnsatisfied { .. }
+    ));
+}
+
+#[test]
+fn phase4_heterogeneous_hybrid_results_are_rejected_instead_of_returning_misleading_provenance() {
+    let first = phase4_fault_candidate(
+        0xa8,
+        "phase4.faults.hybrid.a",
+        "published-a",
+        60,
+        60,
+        VersionLifecycle::Published,
+    );
+    let second = phase4_fault_candidate(
+        0xa9,
+        "phase4.faults.hybrid.b",
+        "published-b",
+        60,
+        60,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::hybrid(
+        *first.index_id(),
+        vec![
+            HybridQueryComponent::with_options(
+                Some(*first.index_id()),
+                AtomicQuery::Exact {
+                    key: KeyMaterial::text("a"),
+                },
+                None,
+            )
+            .expect("first component should be valid"),
+            HybridQueryComponent::with_options(
+                Some(*second.index_id()),
+                AtomicQuery::Exact {
+                    key: KeyMaterial::text("b"),
+                },
+                None,
+            )
+            .expect("second component should be valid"),
+        ],
+    )
+    .expect("hybrid request should be valid");
+    let provider = FaultProvider::new(
+        ProviderCapabilities::with(ProviderCapability::HybridRetrieval),
+        ProviderAvailability::Available,
+        false,
+    );
+    let plan = plan_query(
+        &request,
+        vec![first, second],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("heterogeneous hybrid plan can be formed before result assembly");
+
+    let error = execute(&plan, &provider, &fault_operation_context())
+        .expect_err("heterogeneous hybrid provenance must not be collapsed");
+
+    assert!(matches!(
+        error,
+        RetrievalError::HybridResultUnsupported(
+            nizaam_indexing::query::RetrievalPlanValidationError::HeterogeneousHybridResultTargets
+        )
+    ));
+}

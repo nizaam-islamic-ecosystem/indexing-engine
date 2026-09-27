@@ -1,103 +1,112 @@
-//! Logical query and result contracts for the Indexing Engine.
+//! Backward-compatible Phase 2 query contracts for the Indexing Engine.
 //!
-//! This module defines what a caller asks Indexing to retrieve and what
-//! Indexing can return at the logical contract boundary.
+//! Phase 4 moved the canonical logical query request/result contracts to
+//! [`crate::query`]. This legacy module deliberately keeps the original
+//! `QueryRequest` API intact for callers that still use `crate::index::query`
+//! (and the corresponding `crate::index`/crate-root re-exports).
 //!
-//! It deliberately does not implement query planning, provider selection,
-//! physical lookup, retrieval execution, pagination algorithms, or
-//! domain-object hydration.
+//! The legacy request is a thin adapter over the canonical Phase 4 request:
+//! there is no second query implementation. The adapter preserves the original
+//! `query()` and `into_parts()` signatures while exposing the canonical request
+//! through `Deref`/conversion for newer code.
+//!
+//! New Phase 4 query construction, planning, consistency, and retrieval types
+//! belong to [`crate::query`].
 
-use super::key::KeyMaterial;
-use super::reference::ObjectReference;
-use super::version::IndexVersion;
-use crate::identity::IndexId;
-use core::fmt;
 use core::num::NonZeroUsize;
+use core::ops::Deref;
 
-/// A provider-neutral logical request to retrieve information from an index.
+use crate::identity::IndexId;
+use crate::index::KeyMaterial;
+use crate::query::QueryKind;
+
+pub use crate::query::{
+    MetricKind, QueryHit, QueryHitValidationError, QueryRequestValidationError, QueryResult,
+    QueryResultValidationError,
+};
+
+/// Backward-compatible wrapper around the canonical Phase 4 [`crate::query::QueryRequest`].
 ///
-/// The request identifies the logical index resource and supplies generic
-/// query material. The optional limit expresses a logical result-count
-/// requirement; it does not select a physical retrieval strategy.
-///
-/// Query execution, planning, provider selection, and physical lookup are
-/// intentionally outside this contract.
+/// The legacy constructors create only exact requests, which makes the original
+/// `query() -> &KeyMaterial` and four-element `into_parts()` contract
+/// well-defined. Phase 4 callers should construct [`crate::query::QueryRequest`]
+/// directly when they need non-exact query kinds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryRequest {
-    index_id: IndexId,
-    query: KeyMaterial,
-    limit: Option<NonZeroUsize>,
-    metadata: Option<KeyMaterial>,
+    inner: crate::query::QueryRequest,
 }
 
 impl QueryRequest {
-    /// Constructs a logical query request.
+    /// Constructs the original exact logical query request.
     pub fn new(index_id: IndexId, query: KeyMaterial) -> Result<Self, QueryRequestValidationError> {
-        Self::with_options(index_id, query, None, None)
+        Ok(Self {
+            inner: crate::query::QueryRequest::new(index_id, query)?,
+        })
     }
 
-    /// Constructs a logical query request with optional logical result
-    /// constraints and caller-supplied generic metadata.
+    /// Constructs the original exact logical request with optional limit and metadata.
     pub fn with_options(
         index_id: IndexId,
         query: KeyMaterial,
         limit: Option<NonZeroUsize>,
         metadata: Option<KeyMaterial>,
     ) -> Result<Self, QueryRequestValidationError> {
-        let request = Self {
-            index_id,
-            query,
-            limit,
-            metadata,
-        };
-
-        request.validate()?;
-        Ok(request)
+        Ok(Self {
+            inner: crate::query::QueryRequest::with_options(index_id, query, limit, metadata)?,
+        })
     }
 
-    /// Returns the concrete logical index identity being queried.
+    /// Returns the concrete logical index identity.
     #[must_use]
     pub fn index_id(&self) -> &IndexId {
-        &self.index_id
+        self.inner.index_id()
     }
 
-    /// Returns the generic logical query material.
+    /// Returns the original generic query material.
+    ///
+    /// Legacy `QueryRequest` values are always exact requests. Use
+    /// `query_kind()` on the canonical request for Phase 4 query variants.
     #[must_use]
     pub fn query(&self) -> &KeyMaterial {
-        &self.query
+        self.inner
+            .query_material()
+            .expect("legacy QueryRequest must contain exact query material")
     }
 
     /// Returns the optional logical result-count requirement.
     #[must_use]
     pub fn limit(&self) -> Option<NonZeroUsize> {
-        self.limit
+        self.inner.limit()
     }
 
-    /// Returns caller-supplied generic query metadata, if present.
+    /// Returns caller-supplied generic metadata.
     #[must_use]
     pub fn metadata(&self) -> Option<&KeyMaterial> {
-        self.metadata.as_ref()
+        self.inner.metadata()
     }
 
-    /// Validates the logical query contract.
-    ///
-    /// No physical provider or execution configuration is examined because
-    /// none belongs to `QueryRequest`.
+    /// Validates the wrapped canonical request.
     pub fn validate(&self) -> Result<(), QueryRequestValidationError> {
-        self.query
-            .validate()
-            .map_err(QueryRequestValidationError::InvalidQueryMaterial)?;
-
-        if let Some(metadata) = &self.metadata {
-            metadata
-                .validate()
-                .map_err(QueryRequestValidationError::InvalidMetadata)?;
-        }
-
-        Ok(())
+        self.inner.validate()
     }
 
-    /// Consumes the request and returns its logical components.
+    /// Borrows the canonical Phase 4 request.
+    #[must_use]
+    pub fn as_canonical(&self) -> &crate::query::QueryRequest {
+        &self.inner
+    }
+
+    /// Converts the legacy request into the canonical Phase 4 request.
+    #[must_use]
+    pub fn into_canonical(self) -> crate::query::QueryRequest {
+        self.inner
+    }
+
+    /// Consumes the request using the original Phase 2 four-element tuple.
+    ///
+    /// This compatibility method intentionally preserves the old public
+    /// signature. The richer Phase 4 request decomposition is available through
+    /// `crate::query::QueryRequest::into_parts()`.
     #[must_use]
     pub fn into_parts(
         self,
@@ -107,312 +116,56 @@ impl QueryRequest {
         Option<NonZeroUsize>,
         Option<KeyMaterial>,
     ) {
-        (self.index_id, self.query, self.limit, self.metadata)
-    }
-}
-
-/// A single reference-oriented logical retrieval record.
-///
-/// A hit never owns or hydrates the source object. `reference` remains an
-/// opaque reference to an object owned by another engine.
-///
-/// `score` and `distance` are optional generic retrieval metadata. A provider
-/// or algorithm is free to omit them; this type does not define their
-/// calculation or interpretation.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QueryHit {
-    reference: ObjectReference,
-    score: Option<f64>,
-    distance: Option<f64>,
-    metadata: Option<KeyMaterial>,
-}
-
-impl QueryHit {
-    /// Constructs a reference-only retrieval hit.
-    pub fn new(reference: ObjectReference) -> Self {
-        Self {
-            reference,
-            score: None,
-            distance: None,
-            metadata: None,
-        }
-    }
-
-    /// Sets optional logical retrieval metadata.
-    ///
-    /// Non-finite numeric values are rejected because they cannot represent
-    /// stable logical retrieval metadata.
-    pub fn with_metrics(
-        mut self,
-        score: Option<f64>,
-        distance: Option<f64>,
-    ) -> Result<Self, QueryHitValidationError> {
-        validate_metric(score, MetricKind::Score)?;
-        validate_metric(distance, MetricKind::Distance)?;
-
-        self.score = score;
-        self.distance = distance;
-        Ok(self)
-    }
-
-    /// Sets optional generic retrieval metadata.
-    pub fn with_metadata(mut self, metadata: KeyMaterial) -> Result<Self, QueryHitValidationError> {
-        metadata
-            .validate()
-            .map_err(QueryHitValidationError::InvalidMetadata)?;
-        self.metadata = Some(metadata);
-        Ok(self)
-    }
-
-    /// Returns the source-owned object reference.
-    #[must_use]
-    pub fn reference(&self) -> &ObjectReference {
-        &self.reference
-    }
-
-    /// Returns an optional generic score.
-    #[must_use]
-    pub fn score(&self) -> Option<f64> {
-        self.score
-    }
-
-    /// Returns an optional generic distance.
-    #[must_use]
-    pub fn distance(&self) -> Option<f64> {
-        self.distance
-    }
-
-    /// Returns optional generic retrieval metadata.
-    #[must_use]
-    pub fn metadata(&self) -> Option<&KeyMaterial> {
-        self.metadata.as_ref()
-    }
-
-    /// Validates the retrieval hit.
-    pub fn validate(&self) -> Result<(), QueryHitValidationError> {
-        validate_metric(self.score, MetricKind::Score)?;
-        validate_metric(self.distance, MetricKind::Distance)?;
-
-        if let Some(metadata) = &self.metadata {
-            metadata
-                .validate()
-                .map_err(QueryHitValidationError::InvalidMetadata)?;
-        }
-
-        Ok(())
-    }
-
-    /// Consumes the hit and returns its logical components.
-    #[must_use]
-    pub fn into_parts(
-        self,
-    ) -> (
-        ObjectReference,
-        Option<f64>,
-        Option<f64>,
-        Option<KeyMaterial>,
-    ) {
-        (self.reference, self.score, self.distance, self.metadata)
-    }
-}
-
-/// Generic logical results returned by Indexing.
-///
-/// Results remain reference-oriented. The result contains source-owned
-/// [`ObjectReference`] values rather than domain objects.
-///
-/// The result also records the index identity and logical index version from
-/// which the result was produced. Continuation is opaque metadata for a later
-/// retrieval layer; this Phase 2 contract does not implement continuation
-/// algorithms or pagination state transitions.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QueryResult {
-    index_id: IndexId,
-    index_version: IndexVersion,
-    hits: Vec<QueryHit>,
-    continuation: Option<Vec<u8>>,
-}
-
-impl QueryResult {
-    /// Constructs a result with no continuation information.
-    pub fn new(
-        index_id: IndexId,
-        index_version: IndexVersion,
-        hits: Vec<QueryHit>,
-    ) -> Result<Self, QueryResultValidationError> {
-        Self::with_continuation(index_id, index_version, hits, None)
-    }
-
-    /// Constructs a result with optional opaque continuation information.
-    pub fn with_continuation(
-        index_id: IndexId,
-        index_version: IndexVersion,
-        hits: Vec<QueryHit>,
-        continuation: Option<Vec<u8>>,
-    ) -> Result<Self, QueryResultValidationError> {
-        let result = Self {
+        let (
             index_id,
-            index_version,
-            hits,
-            continuation,
+            _namespace,
+            _definition_id,
+            _family,
+            query,
+            limit,
+            _consistency,
+            _result_mode,
+            metadata,
+        ) = self.inner.into_parts();
+
+        let query = match query {
+            QueryKind::Exact { key } => key,
+            _ => unreachable!("legacy QueryRequest can only contain an exact query"),
         };
 
-        result.validate()?;
-        Ok(result)
-    }
-
-    /// Returns the concrete logical index identity queried.
-    #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        &self.index_id
-    }
-
-    /// Returns the logical index version associated with this result.
-    #[must_use]
-    pub fn index_version(&self) -> &IndexVersion {
-        &self.index_version
-    }
-
-    /// Returns the reference-oriented retrieval hits.
-    #[must_use]
-    pub fn hits(&self) -> &[QueryHit] {
-        &self.hits
-    }
-
-    /// Returns opaque continuation information, if supplied.
-    #[must_use]
-    pub fn continuation(&self) -> Option<&[u8]> {
-        self.continuation.as_deref()
-    }
-
-    /// Validates the complete logical result contract.
-    pub fn validate(&self) -> Result<(), QueryResultValidationError> {
-        self.index_version
-            .validate()
-            .map_err(QueryResultValidationError::InvalidIndexVersion)?;
-
-        for (position, hit) in self.hits.iter().enumerate() {
-            hit.validate()
-                .map_err(|error| QueryResultValidationError::InvalidHit { position, error })?;
-        }
-
-        Ok(())
-    }
-
-    /// Consumes the result and returns its logical components.
-    #[must_use]
-    pub fn into_parts(self) -> (IndexId, IndexVersion, Vec<QueryHit>, Option<Vec<u8>>) {
-        (
-            self.index_id,
-            self.index_version,
-            self.hits,
-            self.continuation,
-        )
+        (index_id, query, limit, metadata)
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum QueryRequestValidationError {
-    InvalidQueryMaterial(super::key::KeyMaterialValidationError),
-    InvalidMetadata(super::key::KeyMaterialValidationError),
-}
+impl Deref for QueryRequest {
+    type Target = crate::query::QueryRequest;
 
-impl fmt::Display for QueryRequestValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidQueryMaterial(error) => {
-                write!(formatter, "invalid query material: {error}")
-            }
-            Self::InvalidMetadata(error) => {
-                write!(formatter, "invalid query metadata: {error}")
-            }
-        }
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
-impl std::error::Error for QueryRequestValidationError {}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum QueryHitValidationError {
-    NonFiniteMetric { kind: MetricKind, value: f64 },
-    InvalidMetadata(super::key::KeyMaterialValidationError),
-}
-
-impl fmt::Display for QueryHitValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NonFiniteMetric { kind, value } => {
-                write!(formatter, "{kind} must be finite, got {value}")
-            }
-            Self::InvalidMetadata(error) => {
-                write!(formatter, "invalid retrieval metadata: {error}")
-            }
-        }
+impl From<QueryRequest> for crate::query::QueryRequest {
+    fn from(request: QueryRequest) -> Self {
+        request.inner
     }
 }
 
-impl std::error::Error for QueryHitValidationError {}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MetricKind {
-    Score,
-    Distance,
-}
-
-impl fmt::Display for MetricKind {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Score => formatter.write_str("score"),
-            Self::Distance => formatter.write_str("distance"),
-        }
+impl AsRef<crate::query::QueryRequest> for QueryRequest {
+    fn as_ref(&self) -> &crate::query::QueryRequest {
+        &self.inner
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum QueryResultValidationError {
-    InvalidIndexVersion(super::version::IndexVersionValidationError),
-    InvalidHit {
-        position: usize,
-        error: QueryHitValidationError,
-    },
-}
-
-impl fmt::Display for QueryResultValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidIndexVersion(error) => {
-                write!(formatter, "invalid index version: {error}")
-            }
-            Self::InvalidHit { position, error } => {
-                write!(
-                    formatter,
-                    "invalid query hit at position {position}: {error}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for QueryResultValidationError {}
-
-fn validate_metric(value: Option<f64>, kind: MetricKind) -> Result<(), QueryHitValidationError> {
-    if let Some(value) = value
-        && !value.is_finite()
-    {
-        return Err(QueryHitValidationError::NonFiniteMetric { kind, value });
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::index::INDEX_ID_BYTE_LEN;
-    use crate::index::{IndexVersionId, SourceVersion};
+    use crate::index::{IndexVersion, IndexVersionId, KeyMaterial, ObjectReference, SourceVersion};
+    use core::num::NonZeroUsize;
 
-    fn index_id(byte: u8) -> IndexId {
-        IndexId::from_bytes([byte; INDEX_ID_BYTE_LEN])
+    fn index_id(byte: u8) -> crate::identity::IndexId {
+        crate::identity::IndexId::from_bytes([byte; INDEX_ID_BYTE_LEN])
     }
 
     fn version(byte: u8) -> IndexVersion {
@@ -521,6 +274,7 @@ mod tests {
         assert_eq!(result.hits().len(), 1);
         assert_eq!(result.hits()[0].reference().object_reference(), "verse:1:1");
         assert!(result.continuation().is_none());
+        assert!(result.consistency().is_none());
     }
 
     #[test]
@@ -534,6 +288,7 @@ mod tests {
         .expect("result should be valid");
 
         assert_eq!(result.continuation(), Some(&[1, 2, 3, 4][..]));
+        assert!(result.consistency().is_none());
     }
 
     #[test]
@@ -554,10 +309,11 @@ mod tests {
 
     #[test]
     fn source_version_remains_distinct_from_index_version() {
-        let source_version = SourceVersion::new("source-v1").expect("source version must be valid");
+        let source_version =
+            SourceVersion::new("source-v1").expect("source version should be valid");
 
         let index_version = IndexVersion::new(
-            IndexVersionId::new("index-v1").expect("index version must be valid"),
+            IndexVersionId::new("index-v1").expect("index version should be valid"),
         );
 
         assert_eq!(source_version.as_ref(), "source-v1");
@@ -574,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn into_parts_preserves_query_request() {
+    fn into_parts_preserves_query_request_contents() {
         let request = QueryRequest::with_options(
             index_id(0xaa),
             KeyMaterial::text("query"),
@@ -583,11 +339,42 @@ mod tests {
         )
         .expect("request should be valid");
 
-        let (index_id, query, limit, metadata) = request.into_parts();
+        let (returned_index_id, query, limit, metadata) = request.into_parts();
 
-        assert_eq!(index_id.as_bytes(), &[0xaa; INDEX_ID_BYTE_LEN]);
+        assert_eq!(returned_index_id.as_bytes(), &[0xaa; INDEX_ID_BYTE_LEN]);
         assert_eq!(query, KeyMaterial::text("query"));
         assert_eq!(limit, NonZeroUsize::new(5));
         assert_eq!(metadata, Some(KeyMaterial::Bool(true)));
+    }
+
+    #[test]
+    fn legacy_request_can_be_borrowed_or_converted_as_canonical_phase4_request() {
+        let request = QueryRequest::new(index_id(0xbc), KeyMaterial::text("bridge"))
+            .expect("legacy request should be valid");
+
+        assert!(matches!(
+            request.as_canonical().query_kind(),
+            crate::query::QueryKind::Exact {
+                key: KeyMaterial::Text(_)
+            }
+        ));
+
+        let canonical: crate::query::QueryRequest = request.into();
+        assert!(matches!(
+            canonical.query_kind(),
+            crate::query::QueryKind::Exact { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_paths_resolve_to_canonical_phase4_types() {
+        let request = QueryRequest::new(index_id(0xbb), KeyMaterial::text("canonical"))
+            .expect("request should be valid");
+
+        let result = QueryResult::new(index_id(0xbb), version(6), Vec::new())
+            .expect("result should be valid");
+
+        let _: crate::query::QueryRequest = request.into();
+        let _: crate::query::QueryResult = result;
     }
 }

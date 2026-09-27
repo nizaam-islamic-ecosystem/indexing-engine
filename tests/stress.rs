@@ -377,3 +377,364 @@ fn rebuild_plus_updates_requires_replay_before_publication() {
     assert_eq!(result.replayed_updates(), 32);
     assert_eq!(result.candidate().len(), 34);
 }
+
+// -----------------------------------------------------------------------------
+// Phase 4 query-pressure coverage
+// -----------------------------------------------------------------------------
+
+use std::fmt::{Display, Formatter};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use nizaam_indexing::consistency::{ConsistencyMode, FreshnessPolicy, SynchronizationSnapshot};
+use nizaam_indexing::provider::{
+    ProviderAvailability, ProviderCapabilities, ProviderCapability, RankingCandidate,
+};
+use nizaam_indexing::query::{
+    ExactRetrievalPlan, FilteredRetrievalPlan, HybridRetrievalPlan, IndexCandidate,
+    NeighborhoodRetrievalPlan, PlannedHybridComponent, ProviderRetriever, QueryKind, QueryRequest,
+    ResultMode, SimilarityRetrievalPlan, StructuredRetrievalPlan, TextRetrievalPlan, execute,
+    plan_query,
+};
+
+fn phase4_stress_index_candidate(
+    seed: u8,
+    version: &str,
+    source_sequence: u64,
+    indexed_sequence: u64,
+    lifecycle: VersionLifecycle,
+) -> IndexCandidate {
+    let definition = definition();
+    let version = nizaam_indexing::index::IndexVersion::with_metadata(
+        version_id(version),
+        Some(source_version("source-v1")),
+        Some(schema_version("schema-v1")),
+        None,
+    )
+    .expect("phase4 stress version should be valid");
+    let mut state = IndexVersionState::new(version);
+    if lifecycle != VersionLifecycle::Building {
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("version should enter validation");
+        state.mark_ready().expect("version should become ready");
+    }
+    if lifecycle == VersionLifecycle::Published {
+        state
+            .mark_published()
+            .expect("version should become published");
+    }
+
+    let synchronization = SynchronizationSnapshot::from_sequences(
+        UpdateSequence::new(source_sequence),
+        UpdateSequence::new(indexed_sequence),
+    )
+    .expect("phase4 synchronization should be valid");
+
+    IndexCandidate::new(index_id(seed), definition, state, synchronization)
+}
+
+#[derive(Clone, Debug)]
+struct StressQueryProvider {
+    capabilities: ProviderCapabilities,
+    calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StressQueryProviderError;
+
+impl Display for StressQueryProviderError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("stress query provider failure")
+    }
+}
+
+impl std::error::Error for StressQueryProviderError {}
+
+impl StressQueryProvider {
+    fn new(capabilities: ProviderCapabilities) -> Self {
+        Self {
+            capabilities,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn exact_result(&self) -> Result<Vec<RankingCandidate>, StressQueryProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(2));
+        Ok(vec![RankingCandidate::new(
+            ObjectReference::new("documents", "stress:object")
+                .expect("stress reference should be valid"),
+        )])
+    }
+}
+
+impl ProviderRetriever for StressQueryProvider {
+    type Error = StressQueryProviderError;
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        ProviderAvailability::Available
+    }
+
+    fn retrieve_exact(
+        &self,
+        _plan: &ExactRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+
+    fn retrieve_text(
+        &self,
+        _plan: &TextRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+
+    fn retrieve_structured(
+        &self,
+        _plan: &StructuredRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+
+    fn retrieve_neighborhood(
+        &self,
+        _plan: &NeighborhoodRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+
+    fn retrieve_similarity(
+        &self,
+        _plan: &SimilarityRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+
+    fn retrieve_filtered(
+        &self,
+        _plan: &FilteredRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+
+    fn retrieve_hybrid(
+        &self,
+        _plan: &HybridRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+
+    fn retrieve_hybrid_component(
+        &self,
+        _component: &PlannedHybridComponent,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.exact_result()
+    }
+}
+
+fn stress_operation_context(seed: usize) -> nizaam_core::operation::OperationContext {
+    nizaam_core::operation::OperationContext::new(nizaam_core::operation::Operation::new(
+        nizaam_core::identity::OperationId::new(format!("phase4-stress-operation-{seed}"))
+            .expect("operation ID should be valid"),
+        nizaam_core::identity::CorrelationId::new(format!("phase4-stress-correlation-{seed}"))
+            .expect("correlation ID should be valid"),
+    ))
+}
+
+#[test]
+fn phase4_concurrent_query_planning_remains_stateless_and_deterministic() {
+    let candidate =
+        phase4_stress_index_candidate(0xa1, "published-v1", 100, 100, VersionLifecycle::Published);
+    let index_id = *candidate.index_id();
+    let request = Arc::new(
+        QueryRequest::exact(index_id, KeyMaterial::text("parallel"))
+            .expect("parallel request should be valid"),
+    );
+    let candidate = Arc::new(candidate);
+    let handles: Vec<_> = (0..16usize)
+        .map(|_| {
+            let request = Arc::clone(&request);
+            let candidate = Arc::clone(&candidate);
+            std::thread::spawn(move || {
+                let plan = plan_query(
+                    &request,
+                    vec![(*candidate).clone()],
+                    &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+                    ProviderAvailability::Available,
+                )
+                .expect("concurrent logical planning should succeed");
+                assert_eq!(
+                    plan.target().expect("target should exist").index_id(),
+                    &index_id
+                );
+                assert_eq!(
+                    plan.target()
+                        .expect("target should exist")
+                        .version()
+                        .id()
+                        .as_str(),
+                    "published-v1"
+                );
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("query-planning worker should finish");
+    }
+}
+
+#[test]
+fn phase4_current_query_remains_on_the_published_version_during_rebuild_pressure() {
+    let published =
+        phase4_stress_index_candidate(0xa2, "published-v1", 120, 120, VersionLifecycle::Published);
+    let rebuilding =
+        phase4_stress_index_candidate(0xa2, "candidate-v2", 120, 120, VersionLifecycle::Ready);
+    let request = QueryRequest::with_spec(
+        *published.index_id(),
+        None,
+        None,
+        None,
+        QueryKind::Exact {
+            key: KeyMaterial::text("during-rebuild"),
+        },
+        None,
+        ConsistencyMode::Current,
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("query should be valid");
+
+    let plan = plan_query(
+        &request,
+        vec![published, rebuilding],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    )
+    .expect("published current state should remain queryable");
+
+    assert_eq!(
+        plan.target()
+            .expect("target should exist")
+            .version()
+            .id()
+            .as_str(),
+        "published-v1"
+    );
+    assert_eq!(
+        plan.target().expect("target should exist").lifecycle(),
+        VersionLifecycle::Published
+    );
+}
+
+#[test]
+fn phase4_stale_allowed_pressure_chooses_the_lowest_acceptable_update_sequence_lag() {
+    let request_candidate =
+        phase4_stress_index_candidate(0xa3, "published-v0", 200, 200, VersionLifecycle::Published);
+    let request = QueryRequest::with_spec(
+        *request_candidate.index_id(),
+        None,
+        None,
+        None,
+        QueryKind::Text {
+            query: KeyMaterial::text("bounded-stale"),
+            parameters: None,
+        },
+        None,
+        ConsistencyMode::StaleAllowed(FreshnessPolicy::new(5)),
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("stale request should be valid");
+
+    let candidates: Vec<_> = (0..32u8)
+        .map(|seed| {
+            phase4_stress_index_candidate(
+                0xa3,
+                &format!("published-v{seed}"),
+                200,
+                if seed == 0 {
+                    200
+                } else {
+                    200 - (u64::from(((seed - 1) % 5) + 1))
+                },
+                VersionLifecycle::Published,
+            )
+        })
+        .collect();
+
+    let plan = plan_query(
+        &request,
+        candidates,
+        &ProviderCapabilities::with(ProviderCapability::TextLookup),
+        ProviderAvailability::Available,
+    )
+    .expect("bounded stale candidates should contain an acceptable version");
+
+    assert_eq!(
+        plan.target()
+            .expect("target should exist")
+            .version()
+            .id()
+            .as_str(),
+        "published-v0"
+    );
+    assert_eq!(
+        plan.target()
+            .expect("target should exist")
+            .consistency()
+            .update_sequence_lag(),
+        Some(0)
+    );
+}
+
+#[test]
+fn phase4_slow_provider_retrieval_remains_bounded_and_completes_under_concurrent_pressure() {
+    let candidate =
+        phase4_stress_index_candidate(0xa4, "published-v1", 300, 300, VersionLifecycle::Published);
+    let index_id = *candidate.index_id();
+    let provider = Arc::new(StressQueryProvider::new(ProviderCapabilities::with(
+        ProviderCapability::ExactLookup,
+    )));
+    let mut handles = Vec::new();
+
+    for worker in 0..8usize {
+        let provider = Arc::clone(&provider);
+        let candidate = candidate.clone();
+        handles.push(std::thread::spawn(move || {
+            let request =
+                QueryRequest::exact(index_id, KeyMaterial::text(format!("worker-{worker}")))
+                    .expect("stress query should be valid");
+            let plan = plan_query(
+                &request,
+                vec![candidate],
+                provider.capabilities(),
+                provider.availability(),
+            )
+            .expect("stress query should plan");
+            let result = execute(&plan, provider.as_ref(), &stress_operation_context(worker))
+                .expect("slow provider should eventually return a result");
+            assert_eq!(result.hits().len(), 1);
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("retrieval worker should finish");
+    }
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
+}

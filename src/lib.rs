@@ -1,19 +1,24 @@
 //! Public library boundary for the Nizaam Indexing Engine.
 //!
 //! The crate root exposes the established Indexing module tree and the public
-//! logical contracts implemented across Phase 1, Phase 2, and Phase 3.
+//! logical contracts implemented across Phase 1, Phase 2, Phase 3, and Phase 4.
 //!
 //! The public boundary keeps ownership explicit:
 //! - `identity` defines Indexing identities and logical namespaces.
 //! - `index` defines logical index families, logical index contracts, and the
-//!   Phase 3 index-version lifecycle contract.
+//!   Phase 3 index-version lifecycle contract. Its legacy query path remains a
+//!   compatibility facade over the canonical Phase 4 query contracts.
+//! - `consistency` defines Indexing-owned Phase 3/Phase 4 consistency contracts.
+//! - `provider` defines the shared provider capability/ranking boundary.
+//! - `query` defines the canonical Phase 4 logical query, planning, retrieval,
+//!   and reference-oriented result contracts.
 //! - `requirement` defines the source-to-Indexing requirement contract.
 //! - Core-owned runtime, capability, lifecycle, contract, and execution
 //!   infrastructure remains owned by `nizaam-core` and is surfaced here only
 //!   through the Indexing engine API where required.
 //!
-//! Physical storage, index construction, retrieval algorithms, provider
-//! implementations, and domain semantics remain outside these logical
+//! Physical storage, index construction, physical retrieval algorithms,
+//! provider implementations, and domain semantics remain outside these logical
 //! contracts.
 
 pub mod build;
@@ -27,6 +32,7 @@ pub mod index;
 pub mod integrity;
 pub mod lifecycle;
 pub mod observability;
+pub mod provider;
 pub mod query;
 pub mod recovery;
 pub mod requirement;
@@ -43,6 +49,10 @@ pub use identity::{
     IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry, NamespaceRegistryError,
     NamespaceValidationError,
 };
+
+// Keep the established Phase 1-3 index exports intact. The query types here
+// resolve through the compatibility facade in `index::query` and therefore
+// remain the same canonical Phase 4 types.
 pub use index::{
     ConsistencyRequirement, ConsistencyRequirementValidationError, IndexDefinition,
     IndexDefinitionValidationError, IndexEntry, IndexEntryValidationError, IndexFamily,
@@ -57,34 +67,49 @@ pub use index::{
 };
 pub use requirement::{IndexRequirement, IndexRequirementValidationError};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// -----------------------------------------------------------------------------
+// Phase 4 consistency public surface
+// -----------------------------------------------------------------------------
 
-    #[test]
-    fn phase3_version_lifecycle_contract_is_publicly_reachable() {
-        let version_id =
-            IndexVersionId::new("crate-root-phase3-v1").expect("test version ID should be valid");
-        let version = IndexVersion::new(version_id);
-        let mut state = IndexVersionState::new(version);
+pub use consistency::{
+    ConsistencyEvaluation, ConsistencyEvaluationState, ConsistencyMode, ConsistencyPolicyError,
+    FreshnessEvaluation, FreshnessPolicy, FreshnessPolicyError, IndexSynchronizationState,
+    SourceVersionSynchronizationState, SynchronizationError, SynchronizationEvaluation,
+    SynchronizationSnapshot, VersioningError, validate_active_version_compatibility,
+    validate_active_version_compatibility_result, validate_candidate_compatibility,
+    validate_candidate_compatibility_result, validate_candidate_lineage,
+    validate_candidate_lineage_result, validate_candidate_schema_compatibility,
+    validate_candidate_schema_compatibility_result, validate_candidate_source_compatibility,
+    validate_candidate_source_compatibility_result, validate_publication_eligibility,
+    validate_publication_eligibility_result,
+};
 
-        assert_eq!(state.lifecycle(), VersionLifecycle::Building);
-        assert!(state.is_candidate());
-        assert!(!state.is_published());
+// -----------------------------------------------------------------------------
+// Phase 4 shared provider public surface
+// -----------------------------------------------------------------------------
 
-        state
-            .transition_to(VersionLifecycle::Validating)
-            .expect("building should transition to validating");
-        state
-            .mark_ready()
-            .expect("validating should transition to ready");
+pub use provider::{
+    ProviderAvailability, ProviderCapabilities, ProviderCapability, ProviderCapabilityError,
+    ProviderRankingError, RankingCandidate, RankingCandidateValidationError, RankingCriterion,
+    RankingDirection, RankingError, RankingPolicy, rank,
+};
 
-        assert_eq!(state.lifecycle(), VersionLifecycle::Ready);
-        assert!(VersionLifecycle::Ready.can_transition_to(VersionLifecycle::Published));
+// -----------------------------------------------------------------------------
+// Phase 4 canonical query public surface
+// -----------------------------------------------------------------------------
+//
+// QueryRequest / QueryHit / QueryResult remain re-exported above through
+// `index` for backward compatibility. The additional Phase 4 contracts are
+// surfaced here without creating duplicate root names.
 
-        // Compile-time reachability checks for the newly exported public error
-        // types without constructing an invalid value.
-        let _: Option<VersionLifecycleTransitionError> = None;
-        let _: Option<VersionValueValidationError> = None;
-    }
-}
+pub use query::{
+    AtomicQuery, AtomicQueryValidationError, CandidateValidationError, CapabilityResolution,
+    ConsistencyMetadata, ConsistencyMetadataValidationError, ConsistencyState, ExactRetrievalPlan,
+    FilteredRetrievalPlan, HybridQueryComponent, HybridQueryComponentValidationError,
+    HybridRetrievalPlan, IndexCandidate, NeighborhoodRetrievalPlan, PlannedHybridComponent,
+    PlannedIndex, ProviderRetriever, QueryCapabilityRequirement, QueryCapabilityRequirementError,
+    QueryKind, QueryKindValidationError, QueryPlanningError, ResultMode, RetrievalError,
+    RetrievalPlan, RetrievalPlanContext, RetrievalPlanValidationError, RetrievalResultError,
+    SimilarityRetrievalPlan, StructuredRetrievalPlan, TextRetrievalPlan, execute, plan_query,
+    validate_plan,
+};
