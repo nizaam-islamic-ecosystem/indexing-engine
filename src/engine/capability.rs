@@ -1,16 +1,19 @@
 //! Capability integration for the Nizaam Indexing Engine.
 //!
-//! Phase 0 uses the capability mechanisms already provided by `nizaam-core`.
+//! Phase 5 keeps capability resolution and dispatch owned by `nizaam-core`.
+//!
 //! This module owns only the Indexing-side composition boundary: it keeps the
 //! Core capability registry behind an Indexing-facing abstraction, registers
-//! engine-owned handlers, and delegates dispatch to Core.
+//! engine-owned handlers, and provides typed dispatch helpers for the
+//! Indexing event boundary.
 //!
 //! No Indexing-specific capability registry or dispatch algorithm is created
-//! here. Core remains responsible for capability resolution, cancellation and
+//! here. Core remains responsible for capability resolution, cancellation,
 //! deadline checks, and handler invocation.
 
 use std::sync::Arc;
 
+use crate::event::IndexEvent;
 use nizaam_core::capability::{
     CapabilityDefinition, CapabilityDispatchResult, CapabilityHandler, CapabilityInvocation,
     CapabilityOutcome, CapabilityRegistry, RegistryError, arc_handler,
@@ -119,6 +122,29 @@ impl CapabilitySet {
         invocation: &CapabilityInvocation,
     ) -> CapabilityDispatchResult {
         nizaam_core::capability::dispatch(self.registry(), context, invocation)
+    }
+
+    /// Dispatches the Core request wrapped by an Indexing event.
+    ///
+    /// The event remains the source of the Core contract descriptor and payload;
+    /// this helper only translates those existing request fields into the Core
+    /// invocation type. It does not create a second registry, routing algorithm,
+    /// event identity, retry policy, or transport protocol.
+    #[must_use]
+    pub(crate) fn dispatch_index_event(
+        &self,
+        context: &EngineContext,
+        event: &IndexEvent,
+    ) -> CapabilityDispatchResult {
+        let envelope = &event.universal_event().envelope;
+        let descriptor = &envelope.metadata.descriptor;
+        let invocation = CapabilityInvocation::new(
+            descriptor.capability_id.clone(),
+            descriptor.contract_id.clone(),
+            envelope.payload.bytes().to_vec(),
+        );
+
+        self.dispatch(context, &invocation)
     }
 
     /// Returns whether a capability is currently registered.

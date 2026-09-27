@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_indexing_owned_fields_are_rejected() {
+    fn rejects_invalid_object_reference_then_accepts_valid_index_event() {
         let request = request(
             EngineId::new("nizaam.source.test").expect("source id must be valid"),
             None,

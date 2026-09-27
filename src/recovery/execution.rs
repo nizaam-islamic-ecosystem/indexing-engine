@@ -335,35 +335,72 @@ impl RecoveryExecutor {
     ) -> Result<RecoveryOutcome, RecoveryExecutionError> {
         match request.action() {
             RecoveryAction::Synchronize => {
-                handler.synchronize(request)?;
+                handler.synchronize(request).map_err(|error| {
+                    RecoveryExecutionError::new(
+                        RecoveryAction::Synchronize,
+                        error.message().to_owned(),
+                    )
+                })?;
                 Ok(RecoveryOutcome::Synchronized)
             }
             RecoveryAction::Rebuild => {
-                handler.rebuild(request)?;
+                handler.rebuild(request).map_err(|error| {
+                    RecoveryExecutionError::new(RecoveryAction::Rebuild, error.message().to_owned())
+                })?;
                 Ok(RecoveryOutcome::Rebuilt)
             }
             RecoveryAction::InvalidateAndRebuild => {
-                handler.invalidate_and_rebuild(request)?;
+                handler.invalidate_and_rebuild(request).map_err(|error| {
+                    RecoveryExecutionError::new(
+                        RecoveryAction::InvalidateAndRebuild,
+                        error.message().to_owned(),
+                    )
+                })?;
                 Ok(RecoveryOutcome::InvalidatedAndRebuildRequested)
             }
             RecoveryAction::RestoreAvailability => {
-                handler.restore_availability(request)?;
+                handler.restore_availability(request).map_err(|error| {
+                    RecoveryExecutionError::new(
+                        RecoveryAction::RestoreAvailability,
+                        error.message().to_owned(),
+                    )
+                })?;
                 Ok(RecoveryOutcome::AvailabilityRestored)
             }
             RecoveryAction::Throttle => {
-                handler.throttle(request)?;
+                handler.throttle(request).map_err(|error| {
+                    RecoveryExecutionError::new(
+                        RecoveryAction::Throttle,
+                        error.message().to_owned(),
+                    )
+                })?;
                 Ok(RecoveryOutcome::Throttled)
             }
             RecoveryAction::DelegateToCoreRetry => {
-                handler.delegate_to_core_retry(request)?;
+                handler.delegate_to_core_retry(request).map_err(|error| {
+                    RecoveryExecutionError::new(
+                        RecoveryAction::DelegateToCoreRetry,
+                        error.message().to_owned(),
+                    )
+                })?;
                 Ok(RecoveryOutcome::DelegatedToCoreRetry)
             }
             RecoveryAction::PreserveSafeState => {
-                handler.preserve_safe_state(request)?;
+                handler.preserve_safe_state(request).map_err(|error| {
+                    RecoveryExecutionError::new(
+                        RecoveryAction::PreserveSafeState,
+                        error.message().to_owned(),
+                    )
+                })?;
                 Ok(RecoveryOutcome::SafeStatePreserved)
             }
             RecoveryAction::SurfaceQueryFailure => {
-                handler.surface_query_failure(request)?;
+                handler.surface_query_failure(request).map_err(|error| {
+                    RecoveryExecutionError::new(
+                        RecoveryAction::SurfaceQueryFailure,
+                        error.message().to_owned(),
+                    )
+                })?;
                 Ok(RecoveryOutcome::QueryFailureSurfaced)
             }
         }
@@ -547,7 +584,7 @@ mod tests {
         impl RecoveryHandler for FailingHandler {
             fn synchronize(&mut self, _: &RecoveryRequest) -> Result<(), RecoveryExecutionError> {
                 Err(RecoveryExecutionError::new(
-                    RecoveryAction::Synchronize,
+                    RecoveryAction::Rebuild,
                     "synchronization unavailable",
                 ))
             }

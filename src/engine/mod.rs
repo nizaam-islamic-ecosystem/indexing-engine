@@ -1,7 +1,8 @@
 //! Indexing Engine module facade and Level 2 module-integration test surface.
 //!
-//! Phase 0 keeps the Indexing Engine deliberately thin. The facade composes
-//! the three engine-boundary modules without introducing a second runtime,
+//! Phase 5 keeps the Indexing Engine deliberately thin. The facade composes
+//! the three Core-backed engine-boundary modules and adds only the Indexing
+//! event/capacity admission boundary; it does not introduce a second runtime,
 //! registry, capability dispatcher, or Control Plane.
 //!
 //! ```text
@@ -9,8 +10,26 @@
 //!      |
 //!      +-- registration.rs  -> Core EngineRegistration / EngineRegistry
 //!      +-- runtime.rs       -> Core EngineRuntime
-//!      +-- capability.rs    -> Core CapabilityRegistry / dispatch
+//!      +-- capability.rs   -> Core CapabilityRegistry / dispatch
 //! ```
+//!
+//! Phase 5 request composition:
+//!
+//! ```text
+//! UniversalRequest / IndexEvent
+//!          ↓
+//! Core lifecycle admission
+//!          ↓
+//! Indexing target + event validation
+//!          ↓
+//! Indexing capacity admission
+//!          ↓
+//! Core-backed capability dispatch
+//! ```
+//!
+//! The actual indexing operation, integrity workflow, recovery execution, and
+//! typed `IndexEventResponse` construction remain owned by their respective
+//! Phase 5 subsystems. This facade does not invent a second execution protocol.
 //!
 //! Level 1 unit tests live in each implementation file. The tests in this
 //! module are Level 2 tests and therefore focus on interactions among
@@ -44,7 +63,10 @@ use nizaam_core::identity::{EngineId, EngineInstanceId, MessageId};
 use nizaam_core::runtime::{LifecycleState, RequestAdmissionError};
 use nizaam_core::status::Status;
 
-/// Coherent Phase 0 facade for one Indexing Engine instance.
+use crate::capacity::{CapacityAccounting, CapacityAdmissionError, CapacityRequest};
+use crate::event::{IndexEvent, IndexEventValidationError};
+
+/// Coherent Indexing Engine facade for one Indexing Engine instance.
 ///
 /// The facade owns the Indexing-side composition of:
 ///
@@ -164,6 +186,78 @@ impl std::error::Error for RequestHandlingError {}
 impl From<RequestAdmissionError> for RequestHandlingError {
     fn from(error: RequestAdmissionError) -> Self {
         Self::Admission(error)
+    }
+}
+
+/// Error produced while admitting a typed Indexing event through the engine
+/// boundary.
+///
+/// Core remains authoritative for lifecycle admission and capability errors.
+/// Indexing contributes only the local event-validation, target-routing, and
+/// bounded-capacity failures required before Core dispatch.
+#[derive(Debug, Eq, PartialEq)]
+pub enum IndexEventHandlingError {
+    Admission(RequestAdmissionError),
+    TargetEngineMismatch {
+        expected: EngineId,
+        actual: EngineId,
+    },
+    TargetInstanceMismatch {
+        expected: EngineInstanceId,
+        actual: EngineInstanceId,
+    },
+    EventValidation(IndexEventValidationError),
+    Capacity(CapacityAdmissionError),
+}
+
+impl std::fmt::Display for IndexEventHandlingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(error) => error.fmt(formatter),
+            Self::TargetEngineMismatch { expected, actual } => write!(
+                formatter,
+                "IndexEvent target engine {} does not match local engine {}",
+                actual.as_str(),
+                expected.as_str(),
+            ),
+            Self::TargetInstanceMismatch { expected, actual } => write!(
+                formatter,
+                "IndexEvent target instance {} does not match local instance {}",
+                actual.as_str(),
+                expected.as_str(),
+            ),
+            Self::EventValidation(error) => error.fmt(formatter),
+            Self::Capacity(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for IndexEventHandlingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Admission(error) => Some(error),
+            Self::EventValidation(error) => Some(error),
+            Self::Capacity(error) => Some(error),
+            Self::TargetEngineMismatch { .. } | Self::TargetInstanceMismatch { .. } => None,
+        }
+    }
+}
+
+impl From<RequestAdmissionError> for IndexEventHandlingError {
+    fn from(error: RequestAdmissionError) -> Self {
+        Self::Admission(error)
+    }
+}
+
+impl From<IndexEventValidationError> for IndexEventHandlingError {
+    fn from(error: IndexEventValidationError) -> Self {
+        Self::EventValidation(error)
+    }
+}
+
+impl From<CapacityAdmissionError> for IndexEventHandlingError {
+    fn from(error: CapacityAdmissionError) -> Self {
+        Self::Capacity(error)
     }
 }
 
@@ -362,6 +456,50 @@ impl IndexingEngine {
         }
     }
 
+    /// Admits and dispatches an already-constructed typed [`IndexEvent`].
+    ///
+    /// This is the Phase 5 composition boundary. The caller supplies the
+    /// logical [`CapacityRequest`] because the event contract intentionally
+    /// does not encode a physical cost or provider-specific workload estimate.
+    /// The returned Core dispatch result remains opaque to this facade; the
+    /// indexing operation layer owns integrity, recovery, and construction of
+    /// [`crate::event::IndexEventResponse`].
+    pub fn handle_index_event(
+        &self,
+        event: &IndexEvent,
+        capacity: &CapacityAccounting,
+        capacity_request: CapacityRequest,
+    ) -> Result<CapabilityDispatchResult, IndexEventHandlingError> {
+        self.runtime.admit_request()?;
+
+        let envelope = &event.universal_event().envelope;
+        let participants = &envelope.metadata.participants;
+
+        if participants.target != self.engine_id().clone() {
+            return Err(IndexEventHandlingError::TargetEngineMismatch {
+                expected: self.engine_id().clone(),
+                actual: participants.target.clone(),
+            });
+        }
+
+        if let Some(target_instance) = participants.target_instance.as_ref()
+            && target_instance != self.engine_instance_id()
+        {
+            return Err(IndexEventHandlingError::TargetInstanceMismatch {
+                expected: self.engine_instance_id().clone(),
+                actual: target_instance.clone(),
+            });
+        }
+
+        event.validate()?;
+
+        let _capacity_lease = capacity.try_acquire(capacity_request)?;
+
+        let context = self.runtime.context(event.operation_context().clone());
+
+        Ok(self.capabilities.dispatch_index_event(&context, event))
+    }
+
     fn response_from_outcome(
         &self,
         request: &UniversalRequest,
@@ -438,6 +576,14 @@ mod tests {
     use nizaam_core::identity::{CapabilityId, ContractId, CorrelationId, MessageId, OperationId};
     use nizaam_core::operation::{Operation, OperationContext};
 
+    use crate::capacity::{CapacityOperation, CapacityRequest};
+    use crate::identity::IndexNamespace;
+    use crate::index::{
+        ConsistencyRequirement, IndexFamily, KeyDefinition, KeyMaterial, ObjectReference,
+        TargetReferenceType, Uniqueness,
+    };
+    use crate::requirement::IndexRequirement;
+
     fn engine_id(value: &str) -> EngineId {
         EngineId::new(value).expect("test engine id must be valid")
     }
@@ -459,6 +605,133 @@ mod tests {
             engine_id("nizaam.indexing.test"),
             instance_id("nizaam.indexing.test.instance"),
         )
+    }
+
+    fn phase5_event(request: UniversalRequest) -> IndexEvent {
+        let requirement = IndexRequirement::new(
+            IndexNamespace::new("logical").expect("namespace must be valid"),
+            IndexFamily::Inverted,
+            KeyDefinition::new(["term"]).expect("key definition must be valid"),
+            TargetReferenceType::new("source.object").expect("target type must be valid"),
+            Uniqueness::NonUnique,
+            ConsistencyRequirement::new("logical").expect("consistency must be valid"),
+            None,
+            None,
+        )
+        .expect("test requirement must be valid");
+
+        IndexEvent::new(
+            request,
+            requirement,
+            ObjectReference::new("nizaam.test.sender", "object:1")
+                .expect("test object reference must be valid"),
+            KeyMaterial::Null,
+        )
+        .expect("test IndexEvent must be valid")
+    }
+
+    fn phase5_capacity() -> CapacityAccounting {
+        CapacityAccounting::from_configuration(
+            crate::configuration::IndexingConfiguration::new(2, 1, 1, 1, 2, 4, 8, 4)
+                .expect("test configuration must be valid"),
+        )
+    }
+
+    #[test]
+    fn phase5_typed_event_boundary_validates_admits_and_dispatches_through_core() {
+        let (engine, _registry, capability_id) = prepare_serving_engine();
+        let request = universal_request_for_engine(
+            &engine,
+            operation_context("phase5-index-event"),
+            capability_id,
+            "phase5-index-event-message",
+            b"phase5-index-event-payload",
+        );
+        let event = phase5_event(request);
+        let capacity = phase5_capacity();
+
+        let result = engine
+            .handle_index_event(
+                &event,
+                &capacity,
+                CapacityRequest::new(CapacityOperation::Build, 1),
+            )
+            .expect("typed IndexEvent should pass engine admission");
+
+        match result {
+            CapabilityDispatchResult::Outcome(outcome) => {
+                assert_eq!(outcome.as_bytes(), b"phase5-index-event-payload");
+            }
+            CapabilityDispatchResult::Error(error) => {
+                panic!("unexpected capability error: {error:?}");
+            }
+        }
+
+        assert_eq!(capacity.usage().consumed_capacity_units(), 0);
+        assert_eq!(capacity.usage().active_builds(), 0);
+    }
+
+    #[test]
+    fn phase5_typed_event_boundary_rejects_capacity_before_core_dispatch() {
+        let (engine, _registry, capability_id) = prepare_serving_engine();
+        let request = universal_request_for_engine(
+            &engine,
+            operation_context("phase5-capacity-rejection"),
+            capability_id,
+            "phase5-capacity-rejection-message",
+            b"must-not-dispatch",
+        );
+        let event = phase5_event(request);
+        let capacity = phase5_capacity();
+        let _held = capacity
+            .try_acquire(CapacityRequest::new(CapacityOperation::Build, 1))
+            .expect("test build reservation should succeed");
+
+        let result = engine.handle_index_event(
+            &event,
+            &capacity,
+            CapacityRequest::new(CapacityOperation::Build, 1),
+        );
+
+        assert!(matches!(
+            result,
+            Err(IndexEventHandlingError::Capacity(
+                CapacityAdmissionError::ConcurrencyLimitReached {
+                    operation: CapacityOperation::Build,
+                    current: 1,
+                    limit: 1,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn phase5_typed_event_boundary_preserves_core_lifecycle_admission() {
+        let engine = new_engine();
+        let capability_id = CapabilityId::new("nizaam.indexing.phase0.probe")
+            .expect("test capability id must be valid");
+        let request = universal_request_for_engine(
+            &engine,
+            operation_context("phase5-lifecycle-rejection"),
+            capability_id,
+            "phase5-lifecycle-rejection-message",
+            b"must-not-dispatch",
+        );
+        let event = phase5_event(request);
+        let capacity = phase5_capacity();
+
+        let result = engine.handle_index_event(
+            &event,
+            &capacity,
+            CapacityRequest::new(CapacityOperation::Build, 1),
+        );
+
+        assert!(matches!(
+            result,
+            Err(IndexEventHandlingError::Admission(
+                RequestAdmissionError::NotServing(LifecycleState::Created)
+            ))
+        ));
     }
 
     fn prepare_serving_engine() -> (IndexingEngine, EngineRegistry, CapabilityId) {
@@ -634,10 +907,14 @@ mod tests {
         }
     }
 
-    fn universal_request(payload: &[u8]) -> UniversalRequest {
-        let capability_id = CapabilityId::new("nizaam.indexing.phase0.probe")
-            .expect("test capability id must be valid");
-        let contract_id = ContractId::new("nizaam.indexing.phase0.public.request")
+    fn request_envelope(
+        engine: &IndexingEngine,
+        operation: OperationContext,
+        capability_id: CapabilityId,
+        message_id: &str,
+        payload: &[u8],
+    ) -> MessageEnvelope {
+        let contract_id = ContractId::new("nizaam.indexing.phase5.public.request")
             .expect("test contract id must be valid");
         let version = Version::new(1, 0, 0);
         let payload_descriptor =
@@ -654,29 +931,50 @@ mod tests {
             descriptor,
             Participants::new(
                 EngineId::new("nizaam.test.sender").expect("sender id must be valid"),
-                EngineId::new("nizaam.indexing.test").expect("target id must be valid"),
+                engine.engine_id().clone(),
             )
             .with_sender_instance(
                 EngineInstanceId::new("nizaam.test.sender.instance")
                     .expect("sender instance id must be valid"),
             )
-            .with_target_instance(
-                EngineInstanceId::new("nizaam.indexing.test.instance")
-                    .expect("target instance id must be valid"),
-            ),
-        );
-        let operation = Operation::new(
-            OperationId::new("public-request.operation").expect("operation id must be valid"),
-            CorrelationId::new("public-request.correlation").expect("correlation id must be valid"),
-        );
-        let envelope = MessageEnvelope::new(
-            MessageId::new("public-request.message").expect("message id must be valid"),
-            OperationContext::new(operation),
-            metadata,
-            EncodedPayload::new(payload_descriptor, payload.to_vec()),
+            .with_target_instance(engine.engine_instance_id().clone()),
         );
 
-        UniversalRequest::new(envelope)
+        MessageEnvelope::new(
+            MessageId::new(message_id).expect("test message id must be valid"),
+            operation,
+            metadata,
+            EncodedPayload::new(payload_descriptor, payload.to_vec()),
+        )
+    }
+
+    fn universal_request_for_engine(
+        engine: &IndexingEngine,
+        operation: OperationContext,
+        capability_id: CapabilityId,
+        message_id: &str,
+        payload: &[u8],
+    ) -> UniversalRequest {
+        UniversalRequest::new(request_envelope(
+            engine,
+            operation,
+            capability_id,
+            message_id,
+            payload,
+        ))
+    }
+
+    fn universal_request(payload: &[u8]) -> UniversalRequest {
+        let engine = new_engine();
+        let capability_id = CapabilityId::new("nizaam.indexing.phase0.probe")
+            .expect("test capability id must be valid");
+        universal_request_for_engine(
+            &engine,
+            operation_context("public-request"),
+            capability_id,
+            "public-request.message",
+            payload,
+        )
     }
 
     #[test]

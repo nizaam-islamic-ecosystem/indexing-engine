@@ -9,7 +9,7 @@
 //!     -> expose Core retryability hint
 //!             |
 //!             v
-//! recovery.rs
+//! execution.rs
 //!     -> select deterministic recovery action
 //!     -> execute one local recovery operation
 //!             |

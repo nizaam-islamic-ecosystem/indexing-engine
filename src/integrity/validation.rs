@@ -43,6 +43,7 @@ use crate::index::{
     ObjectReference, ObjectReferenceValidationError, TargetReferenceType,
 };
 use core::fmt;
+use std::collections::BTreeSet;
 use std::error::Error;
 
 /// Result type returned by the logical integrity validator.
@@ -67,6 +68,14 @@ pub enum IntegrityValidationError {
         position: usize,
         /// Entry-level validation failure.
         error: IndexEntryValidationError,
+    },
+
+    /// A unique index contains more than one entry with the same logical key.
+    UniqueKeyConflict {
+        /// Zero-based position of the conflicting entry.
+        position: usize,
+        /// Logical key that conflicts with an earlier entry.
+        key: crate::index::KeyMaterial,
     },
 
     /// A logical object reference is structurally invalid.
@@ -116,6 +125,10 @@ impl fmt::Display for IntegrityValidationError {
                     "invalid index entry at position {position}: {error}"
                 )
             }
+            Self::UniqueKeyConflict { position, key } => write!(
+                formatter,
+                "unique index contains a conflicting key at position {position}: {key:?}"
+            ),
             Self::InvalidReference(error) => {
                 write!(formatter, "invalid object reference: {error}")
             }
@@ -150,6 +163,7 @@ impl Error for IntegrityValidationError {
             Self::InvalidDefinition(error) => Some(error),
             Self::InvalidVersion(error) => Some(error),
             Self::InvalidEntry { error, .. } => Some(error),
+            Self::UniqueKeyConflict { .. } => None,
             Self::InvalidReference(error) => Some(error),
             Self::VersionCompatibility(error) => Some(error),
             Self::ReferenceTypeMismatch { .. }
@@ -268,11 +282,22 @@ impl IntegrityValidator {
         versioning::validate_candidate_compatibility(version, definition)
             .map_err(IntegrityValidationError::VersionCompatibility)?;
 
-        for (position, entry) in entries.into_iter().enumerate() {
-            entry
-                .validate()
-                .map_err(|error| IntegrityValidationError::InvalidEntry { position, error })?;
-            self.validate_reference(entry.target())?;
+        // Materialize only references so the shared validation path can be
+        // reused before the uniqueness pass; no index-entry payloads are copied.
+        let entries: Vec<&IndexEntry> = entries.into_iter().collect();
+        self.validate_entries(entries.iter().copied())?;
+
+        if definition.uniqueness() == crate::index::Uniqueness::Unique {
+            let mut seen_keys = BTreeSet::new();
+
+            for (position, entry) in entries.iter().enumerate() {
+                if !seen_keys.insert(entry.key()) {
+                    return Err(IntegrityValidationError::UniqueKeyConflict {
+                        position,
+                        key: entry.key().clone(),
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -447,6 +472,40 @@ mod tests {
         IntegrityValidator::new()
             .validate_index(&definition, &version, [&entry()])
             .expect("complete logical index should be valid");
+    }
+
+    #[test]
+    fn rejects_duplicate_keys_for_unique_index() {
+        let base = definition("source.object", Some("source-v1"), Some("schema-v1"));
+        let definition = IndexDefinition::with_metadata(
+            base.identity().clone(),
+            base.key_definition().clone(),
+            base.target_reference_type().clone(),
+            Uniqueness::Unique,
+            base.consistency_requirement().clone(),
+            base.source_version().cloned(),
+            base.schema_version().cloned(),
+            base.lifecycle_metadata().cloned(),
+        )
+        .expect("unique definition should be valid");
+
+        let version = version("v1", Some("source-v1"), Some("schema-v1"));
+        let first = entry();
+        let second = IndexEntry::new(
+            KeyMaterial::text("term"),
+            ObjectReference::new("source", "object:2")
+                .expect("second object reference should be valid"),
+        )
+        .expect("second entry should be valid");
+
+        let error = IntegrityValidator::new()
+            .validate_index(&definition, &version, [&first, &second])
+            .expect_err("duplicate logical keys must be rejected for a unique index");
+
+        assert!(matches!(
+            error,
+            IntegrityValidationError::UniqueKeyConflict { position: 1, .. }
+        ));
     }
 
     #[test]
