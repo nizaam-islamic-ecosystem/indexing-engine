@@ -36,7 +36,7 @@ use crate::error::IndexingResult;
 use crate::identity::IndexId;
 use crate::index::{
     IndexDefinition, IndexEntry, IndexEntryValidationError, IndexVersion, IndexVersionId,
-    IndexVersionValidationError, SchemaVersion, SourceVersion,
+    IndexVersionValidationError, SchemaVersion, SourceVersion, Uniqueness,
 };
 use core::fmt;
 use nizaam_core::contracts::Version as CoreVersion;
@@ -44,6 +44,7 @@ use nizaam_core::error::{
     ErrorClass, ErrorCode, ErrorContext, ErrorEvent, ErrorOwner, GlobalError, Severity,
 };
 use nizaam_core::status::Retryability;
+use std::collections::BTreeSet;
 use std::error::Error;
 
 /// A caller-provided logical source snapshot used to populate a candidate.
@@ -298,6 +299,16 @@ pub enum BuildError {
 
     /// Candidate/definition/source/schema compatibility failed.
     Versioning(VersioningError),
+
+    /// A unique definition contains the same logical key for more than one
+    /// logical entry in the supplied snapshot.
+    UniqueKeyConflict {
+        /// Zero-based position of the later entry that conflicts.
+        position: usize,
+
+        /// Logical key material shared by the conflicting entries.
+        key: crate::index::KeyMaterial,
+    },
 }
 
 impl fmt::Display for BuildError {
@@ -315,6 +326,10 @@ impl fmt::Display for BuildError {
             Self::Versioning(error) => {
                 write!(formatter, "candidate versioning validation failed: {error}")
             }
+            Self::UniqueKeyConflict { position, key } => write!(
+                formatter,
+                "unique candidate key conflict at position {position}: {key:?}"
+            ),
         }
     }
 }
@@ -325,6 +340,7 @@ impl Error for BuildError {
             Self::InvalidEntry { error, .. } => Some(error),
             Self::InvalidVersion(error) => Some(error),
             Self::Versioning(error) => Some(error),
+            Self::UniqueKeyConflict { .. } => None,
         }
     }
 }
@@ -334,21 +350,30 @@ impl BuildError {
     /// contract using the caller-supplied execution context.
     #[must_use]
     pub fn into_global_error(self, context: ErrorContext) -> GlobalError {
-        let (code, message, position) = match self {
+        let (code, message, position, key) = match self {
             Self::InvalidEntry { position, error } => (
                 "INDEXING.BUILD.001",
                 format!("invalid candidate entry at position {position}: {error}"),
                 Some(position),
+                None,
             ),
             Self::InvalidVersion(error) => (
                 "INDEXING.BUILD.002",
                 format!("invalid candidate index version: {error}"),
+                None,
                 None,
             ),
             Self::Versioning(error) => (
                 "INDEXING.BUILD.003",
                 format!("candidate versioning validation failed: {error}"),
                 None,
+                None,
+            ),
+            Self::UniqueKeyConflict { position, key } => (
+                "INDEXING.BUILD.004",
+                format!("unique candidate key conflict at position {position}: {key:?}"),
+                Some(position),
+                Some(key),
             ),
         };
 
@@ -369,6 +394,13 @@ impl BuildError {
         if let Some(position) = position
             && let Some(detail) =
                 nizaam_core::error::DiagnosticDetail::new("entry_position", position.to_string())
+        {
+            global = global.with_detail(detail);
+        }
+
+        if let Some(key) = key
+            && let Some(detail) =
+                nizaam_core::error::DiagnosticDetail::new("conflicting_key", format!("{key:?}"))
         {
             global = global.with_detail(detail);
         }
@@ -460,6 +492,19 @@ impl IndexBuilder {
                 .map_err(|error| BuildError::InvalidEntry { position, error })?;
         }
 
+        if candidate.definition.uniqueness() == Uniqueness::Unique {
+            let mut seen_keys = BTreeSet::new();
+
+            for (position, entry) in candidate.entries.iter().enumerate() {
+                if !seen_keys.insert(entry.key()) {
+                    return Err(BuildError::UniqueKeyConflict {
+                        position,
+                        key: entry.key().clone(),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -517,6 +562,26 @@ mod tests {
                 .expect("test object reference should be valid"),
         )
         .expect("test entry should be valid")
+    }
+
+    fn definition_with_uniqueness(uniqueness: Uniqueness) -> IndexDefinition {
+        IndexDefinition::new(
+            IndexDefinitionIdentity::new(
+                IndexDefinitionId::new("documents.unique")
+                    .expect("test definition ID should be valid"),
+                IndexNamespace::new("search.documents").expect("test namespace should be valid"),
+                crate::index::IndexFamily::Inverted,
+            ),
+            KeyDefinition::new(["term"]).expect("test key definition should be valid"),
+            TargetReferenceType::new("source.document")
+                .expect("test target reference type should be valid"),
+            uniqueness,
+            ConsistencyRequirement::new("logical-v1")
+                .expect("test consistency requirement should be valid"),
+            None,
+            None,
+        )
+        .expect("unique test definition should be valid")
     }
 
     fn input(
@@ -586,6 +651,28 @@ mod tests {
                 .as_str(),
             "schema-v5"
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_keys_across_a_unique_snapshot() {
+        let snapshot = BuildSnapshot::new(vec![entry("same", "doc:1"), entry("same", "doc:2")]);
+
+        let error = IndexBuilder::new()
+            .build(input(
+                index_id(0x31),
+                "index-unique",
+                definition_with_uniqueness(Uniqueness::Unique),
+                snapshot,
+            ))
+            .expect_err("a unique snapshot must reject duplicate logical keys");
+
+        assert!(matches!(
+            error,
+            BuildError::UniqueKeyConflict {
+                position: 1,
+                ref key
+            } if key == &KeyMaterial::text("same")
+        ));
     }
 
     #[test]

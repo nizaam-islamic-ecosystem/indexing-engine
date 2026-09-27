@@ -146,14 +146,8 @@ impl BatchResult {
         }
     }
 
-    fn record_committed_chunk(
-        &mut self,
-        mutation_count: usize,
-        candidate: BuildCandidate,
-        journal: UpdateJournal,
-    ) {
+    fn record_committed_chunk(&mut self, mutation_count: usize, candidate: BuildCandidate) {
         self.candidate = candidate;
-        self.journal = journal;
         self.completed_chunks += 1;
         self.applied_mutations += mutation_count;
     }
@@ -304,6 +298,12 @@ impl BatchError {
 
 impl BatchExecutor {
     /// Core-error result adapter for bounded batch execution.
+    ///
+    /// This adapter deliberately projects the typed [`BatchError`] into Core's
+    /// `ErrorEvent` boundary. The typed error retains the exact committed
+    /// candidate and journal prefix, while this Core projection exposes the
+    /// committed chunk/mutation counts as diagnostics. Call [`Self::execute`]
+    /// when the committed state itself is required for recovery or continuation.
     #[allow(clippy::result_large_err)]
     pub fn execute_result<I>(
         &self,
@@ -321,6 +321,10 @@ impl BatchExecutor {
     }
 
     /// Core-error result adapter for execution of one bounded chunk.
+    ///
+    /// Like [`Self::execute_result`], this Core projection does not transport
+    /// the typed committed `BatchResult`; use [`Self::execute_one_chunk`] when
+    /// exact committed state must remain available after a typed failure.
     #[allow(clippy::result_large_err)]
     pub fn execute_one_chunk_result<I>(
         &self,
@@ -361,9 +365,11 @@ impl BatchExecutor {
     /// Applies a logical mutation stream in bounded transactional chunks.
     ///
     /// Each chunk is collected only up to the caller-supplied bound, then
-    /// applied atomically to the current candidate. The update journal is
-    /// cloned for the chunk as well; the candidate and journal are committed
-    /// together only after the complete chunk has succeeded.
+    /// applied atomically to the current candidate. The candidate is produced
+    /// through the functional update boundary, while journal append capacity is
+    /// validated for the whole chunk before any journal record is retained.
+    /// Candidate and journal state are committed together only after the complete
+    /// chunk has succeeded.
     ///
     /// This preserves:
     ///
@@ -404,31 +410,29 @@ impl BatchExecutor {
                 break;
             }
 
-            let candidate_before_chunk = committed.candidate.clone();
-            let journal_before_chunk = committed.journal.clone();
-
-            let updated_candidate = self
+            let updated_candidate = match self
                 .updater
-                .apply_mutations(&candidate_before_chunk, chunk.iter().cloned())
-                .map_err(|error| BatchError::ChunkFailed {
-                    chunk_index,
-                    error: BatchChunkError::Update(error),
-                    committed: committed.clone(),
-                })?;
-
-            let mut updated_journal = journal_before_chunk.clone();
-
-            for mutation in chunk.iter().cloned() {
-                if let Err(error) = updated_journal.append(mutation) {
+                .apply_mutations(&committed.candidate, chunk.iter().cloned())
+            {
+                Ok(candidate) => candidate,
+                Err(error) => {
                     return Err(BatchError::ChunkFailed {
                         chunk_index,
-                        error: BatchChunkError::Journal(error),
+                        error: BatchChunkError::Update(error),
                         committed,
                     });
                 }
+            };
+
+            if let Err(error) = committed.journal.append_batch(&chunk) {
+                return Err(BatchError::ChunkFailed {
+                    chunk_index,
+                    error: BatchChunkError::Journal(error),
+                    committed,
+                });
             }
 
-            committed.record_committed_chunk(chunk.len(), updated_candidate, updated_journal);
+            committed.record_committed_chunk(chunk.len(), updated_candidate);
 
             chunk_index += 1;
         }
@@ -471,22 +475,16 @@ impl BatchExecutor {
 
         let mut updated_journal = journal.clone();
 
-        for mutation in chunk.iter().cloned() {
-            if let Err(error) = updated_journal.append(mutation) {
-                return Err(BatchError::ChunkFailed {
-                    chunk_index: 0,
-                    error: BatchChunkError::Journal(error),
-                    committed: BatchResult::new(candidate.clone(), journal.clone()),
-                });
-            }
+        if let Err(error) = updated_journal.append_batch(&chunk) {
+            return Err(BatchError::ChunkFailed {
+                chunk_index: 0,
+                error: BatchChunkError::Journal(error),
+                committed: BatchResult::new(candidate.clone(), journal.clone()),
+            });
         }
 
         let mut result = BatchResult::new(updated_candidate, updated_journal);
-        result.record_committed_chunk(
-            chunk.len(),
-            result.candidate.clone(),
-            result.journal.clone(),
-        );
+        result.record_committed_chunk(chunk.len(), result.candidate.clone());
 
         Ok(result)
     }

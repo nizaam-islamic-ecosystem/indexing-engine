@@ -48,9 +48,9 @@ mod tests {
     use super::*;
     use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace};
     use crate::index::{
-        ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion,
-        IndexVersionId, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
-        TargetReferenceType, Uniqueness,
+        ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersionId,
+        IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion,
+        SourceVersion, TargetReferenceType, Uniqueness, VersionLifecycle,
     };
 
     fn index_id(seed: u8) -> IndexId {
@@ -114,6 +114,17 @@ mod tests {
             .expect("test candidate should build")
     }
 
+    fn ready_state(candidate: &BuildCandidate) -> IndexVersionState {
+        let mut state = IndexVersionState::new(candidate.version().clone());
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("candidate state should enter validation");
+        state
+            .mark_ready()
+            .expect("candidate state should become ready");
+        state
+    }
+
     #[test]
     fn build_boundary_exports_are_usable_across_builder_and_update_modules() {
         let base = build_candidate(index_id(0x11), "index-v1", vec![entry("alpha", "doc:1")]);
@@ -127,9 +138,7 @@ mod tests {
             );
 
         let (updated, sequence) = applied.expect("cross-module update should succeed");
-        let logical_version = IndexVersion::new(version_id("index-v1"));
 
-        assert_eq!(logical_version.id(), base.version().id());
         assert_eq!(sequence, UpdateSequence::new(1));
         assert_eq!(journal.current_sequence(), sequence);
         assert_eq!(journal.records()[0].sequence(), sequence);
@@ -189,11 +198,12 @@ mod tests {
             BuildSnapshot::with_versions(
                 Some(source_version("source-v1")),
                 Some(schema_version("schema-v1")),
-                vec![entry("alpha", "doc:1")],
+                vec![entry("before", "doc:before"), entry("alpha", "doc:1")],
             ),
             Some(version_id("index-v1")),
             Some(version_id("index-v1")),
-        );
+        )
+        .with_snapshot_sequence(UpdateSequence::new(1));
 
         let rebuilder = IndexRebuilder::new();
         let progress = rebuilder
@@ -203,7 +213,7 @@ mod tests {
         assert_eq!(progress.captured_sequence(), UpdateSequence::new(1));
         assert_eq!(progress.replayed_through(), UpdateSequence::new(1));
         assert_eq!(progress.replayed_updates(), 0);
-        assert_eq!(progress.candidate().len(), 1);
+        assert_eq!(progress.candidate().len(), 2);
 
         journal
             .append(IndexMutation::Insert(entry("after", "doc:after")))
@@ -222,7 +232,7 @@ mod tests {
         assert_eq!(result.captured_sequence(), UpdateSequence::new(1));
         assert_eq!(result.replayed_through(), UpdateSequence::new(2));
         assert_eq!(result.replayed_updates(), 1);
-        assert_eq!(result.candidate().len(), 2);
+        assert_eq!(result.candidate().len(), 3);
         assert_eq!(result.candidate().version().id().as_str(), "index-v2");
     }
 
@@ -250,18 +260,21 @@ mod tests {
         let previous_active =
             build_candidate(index_id(0x44), "index-v1", vec![entry("alpha", "doc:1")]);
 
+        let candidate = rebuilt.candidate().clone();
+        let candidate_state = ready_state(&candidate);
         let publisher = IndexPublisher::new();
         let prepared: PublicationCandidate = publisher
-            .prepare(
-                rebuilt.candidate().clone(),
-                rebuilt.candidate().definition(),
-                Some(version_id("index-v1")),
+            .prepare_rebuild(
+                rebuilt,
+                candidate_state,
+                candidate.definition(),
                 Some(version_id("index-v1")),
             )
             .expect("rebuilt candidate should pass publication preparation");
 
+        let journal = UpdateJournal::new();
         let result: Result<PublicationResult, PublicationError> =
-            publisher.publish(prepared, Some(previous_active.clone()));
+            publisher.publish(prepared, Some(previous_active.clone()), Some(&journal));
 
         let result = result.expect("publication should succeed at the explicit boundary");
 

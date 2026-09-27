@@ -71,6 +71,14 @@ pub struct RebuildInput {
     definition: IndexDefinition,
     candidate_version_id: IndexVersionId,
     snapshot: BuildSnapshot,
+
+    /// Journal sequence captured alongside the source snapshot.
+    ///
+    /// The caller must capture this value at the same observation boundary as
+    /// `snapshot`. Rebuild then replays only records strictly newer than this
+    /// sequence.
+    snapshot_sequence: UpdateSequence,
+
     base_version: Option<IndexVersionId>,
     active_version: Option<IndexVersionId>,
 }
@@ -92,9 +100,18 @@ impl RebuildInput {
             definition,
             candidate_version_id,
             snapshot,
+            snapshot_sequence: UpdateSequence::INITIAL,
             base_version,
             active_version,
         }
+    }
+
+    /// Associates the journal sequence captured with the supplied source
+    /// snapshot.
+    #[must_use]
+    pub fn with_snapshot_sequence(mut self, sequence: UpdateSequence) -> Self {
+        self.snapshot_sequence = sequence;
+        self
     }
 
     /// Returns the logical index identity targeted by the rebuild.
@@ -119,6 +136,12 @@ impl RebuildInput {
     #[must_use]
     pub fn snapshot(&self) -> &BuildSnapshot {
         &self.snapshot
+    }
+
+    /// Returns the journal sequence captured alongside the source snapshot.
+    #[must_use]
+    pub const fn snapshot_sequence(&self) -> UpdateSequence {
+        self.snapshot_sequence
     }
 
     /// Returns the version the caller observed as the candidate's base.
@@ -541,10 +564,19 @@ impl IndexRebuilder {
         let base_version = input.base_version.clone();
         let active_version = input.active_version.clone();
 
-        // The source snapshot is already supplied by the caller. Capture the
-        // journal boundary before construction so mutations accepted during
-        // the build remain eligible for replay.
-        let sequence = journal.current_sequence();
+        // The caller captured the source snapshot and its journal sequence
+        // together. Do not infer the replay boundary from the journal after
+        // receiving the snapshot because accepted mutations may have arrived
+        // between those two observations.
+        let snapshot_sequence = input.snapshot_sequence();
+        let observed_sequence = journal.current_sequence();
+
+        if observed_sequence < snapshot_sequence {
+            return Err(RebuildError::JournalSequenceRegressed {
+                replayed_through: snapshot_sequence,
+                observed: observed_sequence,
+            });
+        }
 
         let build_input = BuildInput::new(
             input.index_id,
@@ -568,8 +600,8 @@ impl IndexRebuilder {
         Ok(RebuildProgress {
             candidate,
             base_version,
-            captured_sequence: sequence,
-            replayed_through: sequence,
+            captured_sequence: snapshot_sequence,
+            replayed_through: snapshot_sequence,
             replayed_updates: 0,
         })
     }
@@ -600,6 +632,7 @@ impl IndexRebuilder {
         let mut candidate = progress.candidate.clone();
         let mut replayed_through = progress.replayed_through;
         let mut replayed_updates = progress.replayed_updates;
+        let mut pending_mutations = Vec::new();
 
         for record in journal.records_after(progress.replayed_through) {
             let sequence = record.sequence();
@@ -611,13 +644,16 @@ impl IndexRebuilder {
                 });
             }
 
-            candidate = self
-                .updater
-                .apply(&candidate, record.mutation().clone())
-                .map_err(RebuildError::Update)?;
-
+            pending_mutations.push(record.mutation().clone());
             replayed_through = sequence;
             replayed_updates += 1;
+        }
+
+        if !pending_mutations.is_empty() {
+            candidate = self
+                .updater
+                .apply_mutations(&candidate, pending_mutations)
+                .map_err(RebuildError::Update)?;
         }
 
         Ok(RebuildProgress {
@@ -775,25 +811,94 @@ mod tests {
             .append(insert("old", "doc:old"))
             .expect("append should succeed");
 
+        let snapshot = BuildSnapshot::with_versions(
+            Some(source_version("source-v1")),
+            Some(schema_version("schema-v1")),
+            vec![entry("old", "doc:old"), entry("alpha", "doc:1")],
+        );
+
         let rebuilder = IndexRebuilder::new();
         let progress = rebuilder
             .start(
-                input(
-                    Some("index-v1"),
-                    Some("index-v1"),
-                    vec![entry("alpha", "doc:1")],
-                ),
+                RebuildInput::new(
+                    index_id(0x55),
+                    definition(Some("source-v1"), Some("schema-v1")),
+                    version_id("index-v2"),
+                    snapshot,
+                    Some(version_id("index-v1")),
+                    Some(version_id("index-v1")),
+                )
+                .with_snapshot_sequence(UpdateSequence::new(1)),
                 &journal,
             )
             .expect("rebuild should start");
 
-        assert_eq!(progress.captured_sequence().value(), 1);
-        assert_eq!(progress.replayed_through().value(), 1);
+        journal
+            .append(insert("after-start-boundary", "doc:after"))
+            .expect("append should succeed");
+
+        assert_eq!(progress.captured_sequence(), UpdateSequence::new(1));
+        assert_eq!(progress.replayed_through(), UpdateSequence::new(1));
         assert_eq!(progress.replayed_updates(), 0);
-        assert_eq!(progress.candidate().len(), 1);
+        assert_eq!(progress.candidate().len(), 2);
+        assert!(
+            progress
+                .candidate()
+                .entries()
+                .iter()
+                .any(|value| value.key() == &KeyMaterial::text("old"))
+        );
         assert_eq!(
             progress.base_version().map(IndexVersionId::as_str),
             Some("index-v1")
+        );
+
+        let replayed = rebuilder
+            .replay(&progress, &journal)
+            .expect("post-snapshot update must replay");
+
+        assert_eq!(replayed.replayed_through(), UpdateSequence::new(2));
+        assert_eq!(replayed.replayed_updates(), 1);
+        assert!(
+            replayed
+                .candidate()
+                .entries()
+                .iter()
+                .any(|value| value.key() == &KeyMaterial::text("after-start-boundary"))
+        );
+    }
+
+    #[test]
+    fn start_rejects_journal_older_than_snapshot_boundary() {
+        let mut journal = UpdateJournal::new();
+        journal
+            .append(insert("one", "doc:1"))
+            .expect("append should succeed");
+
+        let input = RebuildInput::new(
+            index_id(0x55),
+            definition(Some("source-v1"), Some("schema-v1")),
+            version_id("index-v2"),
+            BuildSnapshot::with_versions(
+                Some(source_version("source-v1")),
+                Some(schema_version("schema-v1")),
+                vec![entry("one", "doc:1"), entry("two", "doc:2")],
+            ),
+            Some(version_id("index-v1")),
+            Some(version_id("index-v1")),
+        )
+        .with_snapshot_sequence(UpdateSequence::new(2));
+
+        let error = IndexRebuilder::new()
+            .start(input, &journal)
+            .expect_err("journal must not precede captured snapshot boundary");
+
+        assert_eq!(
+            error,
+            RebuildError::JournalSequenceRegressed {
+                replayed_through: UpdateSequence::new(2),
+                observed: UpdateSequence::new(1),
+            }
         );
     }
 
@@ -881,8 +986,9 @@ mod tests {
                 input(
                     Some("index-v1"),
                     Some("index-v1"),
-                    vec![entry("alpha", "doc:1")],
-                ),
+                    vec![entry("before", "doc:before"), entry("alpha", "doc:1")],
+                )
+                .with_snapshot_sequence(UpdateSequence::new(1)),
                 &journal,
             )
             .expect("rebuild should start");
@@ -900,27 +1006,15 @@ mod tests {
 
         assert_eq!(replayed.replayed_through().value(), 3);
         assert_eq!(replayed.replayed_updates(), 2);
-        assert!(
-            replayed
-                .candidate()
-                .entries()
-                .iter()
-                .any(|value| value.key() == &KeyMaterial::text("after"))
-        );
-        assert!(
-            replayed
-                .candidate()
-                .entries()
-                .iter()
-                .any(|value| value.key() == &KeyMaterial::text("later"))
-        );
-        assert!(
-            replayed
-                .candidate()
-                .entries()
-                .iter()
-                .all(|value| value.key() != &KeyMaterial::text("before"))
-        );
+        for key in ["before", "after", "later"] {
+            assert!(
+                replayed
+                    .candidate()
+                    .entries()
+                    .iter()
+                    .any(|value| value.key() == &KeyMaterial::text(key))
+            );
+        }
     }
 
     #[test]
@@ -1029,7 +1123,15 @@ mod tests {
 
         let rebuilder = IndexRebuilder::new();
         let progress = rebuilder
-            .start(input(None, None, vec![entry("alpha", "doc:1")]), &journal)
+            .start(
+                input(
+                    None,
+                    None,
+                    vec![entry("beta", "doc:2"), entry("alpha", "doc:1")],
+                )
+                .with_snapshot_sequence(UpdateSequence::new(1)),
+                &journal,
+            )
             .expect("rebuild should start");
 
         let older_journal = UpdateJournal::new();
@@ -1112,7 +1214,7 @@ mod tests {
             .rebuild(input(None, None, vec![entry("alpha", "doc:1")]), &journal)
             .expect("stable-journal rebuild should complete");
 
-        assert_eq!(result.replayed_updates(), 0);
+        assert_eq!(result.replayed_updates(), 1);
         assert_eq!(result.replayed_through(), journal.current_sequence());
     }
 }

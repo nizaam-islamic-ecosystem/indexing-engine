@@ -14,8 +14,8 @@ use nizaam_indexing::identity::{
 };
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersionId,
-    KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion, TargetReferenceType,
-    Uniqueness,
+    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
+    TargetReferenceType, Uniqueness, VersionLifecycle,
 };
 
 fn index_id(seed: u8) -> IndexId {
@@ -59,6 +59,17 @@ fn entry(key: &str, reference: &str) -> IndexEntry {
         ObjectReference::new("documents", reference).expect("reference should be valid"),
     )
     .expect("entry should be valid")
+}
+
+fn ready_state(candidate: &nizaam_indexing::build::BuildCandidate) -> IndexVersionState {
+    let mut state = IndexVersionState::new(candidate.version().clone());
+    state
+        .transition_to(VersionLifecycle::Validating)
+        .expect("candidate state should enter validation");
+    state
+        .mark_ready()
+        .expect("candidate state should become ready");
+    state
 }
 
 fn candidate(
@@ -247,9 +258,11 @@ fn validation_fault_rejects_an_incompatible_publication_candidate() {
     )
     .expect("definition should be valid");
 
+    let candidate_state = ready_state(&candidate);
     let error = publisher
         .prepare(
             candidate,
+            candidate_state,
             &mismatched_definition,
             Some(version_id("index-v1")),
             Some(version_id("index-v1")),
@@ -277,7 +290,8 @@ fn publication_fault_preserves_the_newer_active_candidate() {
 
     let prepared_v2 = publisher
         .prepare(
-            v2,
+            v2.clone(),
+            ready_state(&v2),
             v1.definition(),
             Some(version_id("index-v1")),
             Some(version_id("index-v1")),
@@ -288,19 +302,21 @@ fn publication_fault_preserves_the_newer_active_candidate() {
         .publish(
             publisher
                 .prepare(
-                    v3,
+                    v3.clone(),
+                    ready_state(&v3),
                     v1.definition(),
                     Some(version_id("index-v1")),
                     Some(version_id("index-v1")),
                 )
                 .expect("v3 should prepare"),
             Some(v1),
+            None,
         )
         .expect("v3 should publish");
 
     let active_v3 = published_v3.active().clone();
     let error = publisher
-        .publish(prepared_v2, Some(active_v3.clone()))
+        .publish(prepared_v2, Some(active_v3.clone()), None)
         .expect_err("older prepared candidate must be rejected");
 
     assert!(matches!(

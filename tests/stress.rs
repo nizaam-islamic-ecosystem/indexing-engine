@@ -16,8 +16,8 @@ use nizaam_indexing::identity::{
 };
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersionId,
-    KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion, TargetReferenceType,
-    Uniqueness,
+    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
+    TargetReferenceType, Uniqueness, VersionLifecycle,
 };
 
 fn index_id(seed: u8) -> IndexId {
@@ -61,6 +61,17 @@ fn entry(key: impl Into<String>, reference: impl Into<String>) -> IndexEntry {
         ObjectReference::new("documents", reference).expect("reference should be valid"),
     )
     .expect("entry should be valid")
+}
+
+fn ready_state(candidate: &nizaam_indexing::build::BuildCandidate) -> IndexVersionState {
+    let mut state = IndexVersionState::new(candidate.version().clone());
+    state
+        .transition_to(VersionLifecycle::Validating)
+        .expect("candidate state should enter validation");
+    state
+        .mark_ready()
+        .expect("candidate state should become ready");
+    state
 }
 
 fn build_candidate(
@@ -142,7 +153,7 @@ fn concurrent_candidate_updates_do_not_cross_contaminate_journals() {
                 vec![entry("base", format!("doc:{seed}"))],
             );
             let updater = CandidateUpdater::new();
-            let candidate = updater
+            let mut candidate = updater
                 .create_candidate(
                     &base,
                     version_id(&format!("index-v{seed}-candidate")),
@@ -153,7 +164,7 @@ fn concurrent_candidate_updates_do_not_cross_contaminate_journals() {
             let mut journal = UpdateJournal::new();
 
             for update_number in 0..24usize {
-                updater
+                let (updated, _) = updater
                     .apply_and_record(
                         &candidate,
                         IndexMutation::Insert(entry(
@@ -163,17 +174,28 @@ fn concurrent_candidate_updates_do_not_cross_contaminate_journals() {
                         &mut journal,
                     )
                     .expect("logical update should succeed");
+                candidate = updated;
             }
 
-            (candidate.len(), journal.current_sequence(), journal.len())
+            (
+                candidate.len(),
+                journal.current_sequence(),
+                journal.len(),
+                candidate
+                    .entries()
+                    .iter()
+                    .any(|value| value.key() == &KeyMaterial::text("term-23")),
+            )
         }));
     }
 
     for handle in handles {
-        let (base_len, sequence, journal_len) = handle.join().expect("worker should complete");
-        assert_eq!(base_len, 1);
+        let (candidate_len, sequence, journal_len, contains_last_update) =
+            handle.join().expect("worker should complete");
+        assert_eq!(candidate_len, 25);
         assert_eq!(sequence, UpdateSequence::new(24));
         assert_eq!(journal_len, 24);
+        assert!(contains_last_update);
     }
 }
 
@@ -272,9 +294,11 @@ fn repeated_publication_advances_only_through_explicit_boundaries() {
             ],
         );
 
+        let candidate_state = ready_state(&candidate);
         let prepared = publisher
             .prepare(
                 candidate,
+                candidate_state,
                 active.definition(),
                 Some(active.version().id().clone()),
                 Some(active.version().id().clone()),
@@ -282,7 +306,7 @@ fn repeated_publication_advances_only_through_explicit_boundaries() {
             .expect("candidate should prepare against the current active version");
 
         let publication = publisher
-            .publish(prepared, Some(active))
+            .publish(prepared, Some(active), None)
             .expect("explicit publication should succeed");
 
         let expected_previous = format!("index-v{}", version_number - 1);
@@ -320,11 +344,12 @@ fn rebuild_plus_updates_requires_replay_before_publication() {
                 BuildSnapshot::with_versions(
                     Some(source_version("source-v1")),
                     Some(schema_version("schema-v1")),
-                    vec![entry("base", "doc:base")],
+                    vec![entry("base", "doc:base"), entry("before", "doc:before")],
                 ),
                 Some(version_id("index-v1")),
                 Some(version_id("index-v1")),
-            ),
+            )
+            .with_snapshot_sequence(UpdateSequence::new(1)),
             &journal,
         )
         .expect("rebuild should start");
@@ -350,5 +375,5 @@ fn rebuild_plus_updates_requires_replay_before_publication() {
     assert_eq!(result.captured_sequence(), UpdateSequence::new(1));
     assert_eq!(result.replayed_through(), UpdateSequence::new(33));
     assert_eq!(result.replayed_updates(), 32);
-    assert_eq!(result.candidate().len(), 33);
+    assert_eq!(result.candidate().len(), 34);
 }

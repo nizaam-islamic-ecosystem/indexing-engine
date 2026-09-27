@@ -284,6 +284,39 @@ impl UpdateJournal {
             .expect("journal contains the record appended immediately above"))
     }
 
+    /// Appends a bounded collection of successful logical mutations
+    /// transactionally.
+    ///
+    /// Sequence exhaustion is checked for the whole collection before any
+    /// record is retained, so a failed append does not partially modify the
+    /// journal.
+    pub fn append_batch(
+        &mut self,
+        mutations: &[IndexMutation],
+    ) -> Result<usize, UpdateJournalError> {
+        let mut sequence = self.next_sequence;
+
+        for _ in mutations {
+            sequence = sequence
+                .next()
+                .ok_or(UpdateJournalError::SequenceExhausted)?;
+        }
+
+        let mut appended = 0usize;
+        for mutation in mutations {
+            sequence = self
+                .next_sequence
+                .next()
+                .expect("append_batch sequence capacity was prevalidated");
+            self.records
+                .push(UpdateRecord::new(sequence, mutation.clone()));
+            self.next_sequence = sequence;
+            appended += 1;
+        }
+
+        Ok(appended)
+    }
+
     /// Returns mutations whose sequence is strictly greater than `after`.
     ///
     /// This provides the deterministic replay boundary needed by rebuild
@@ -294,7 +327,7 @@ impl UpdateJournal {
             .filter(move |record| record.sequence() > after)
     }
 
-    /// Consumes the journal and returns its next sequence and records.
+    /// Consumes the journal and returns its latest accepted sequence and records.
     #[must_use]
     pub fn into_parts(self) -> (UpdateSequence, Vec<UpdateRecord>) {
         (self.next_sequence, self.records)
@@ -1252,6 +1285,25 @@ mod tests {
         assert!(result.is_err());
         assert!(journal.is_empty());
         assert_eq!(journal.current_sequence(), UpdateSequence::INITIAL);
+    }
+
+    #[test]
+    fn append_batch_is_transactional_and_assigns_monotonic_sequences() {
+        let mut journal = UpdateJournal::new();
+        let mutations = vec![
+            IndexMutation::Insert(entry("alpha", "doc:1")),
+            IndexMutation::Insert(entry("beta", "doc:2")),
+        ];
+
+        let appended = journal
+            .append_batch(&mutations)
+            .expect("bounded batch append should succeed");
+
+        assert_eq!(appended, 2);
+        assert_eq!(journal.current_sequence(), UpdateSequence::new(2));
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal.records()[0].sequence(), UpdateSequence::new(1));
+        assert_eq!(journal.records()[1].sequence(), UpdateSequence::new(2));
     }
 
     #[test]

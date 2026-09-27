@@ -72,8 +72,9 @@ use nizaam_indexing::identity::{
 };
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion, IndexVersionId,
-    KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryRequest, QueryResult,
-    SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
+    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryRequest,
+    QueryResult, SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
+    VersionLifecycle,
 };
 use nizaam_indexing::requirement::IndexRequirement;
 use nizaam_indexing::{IndexingEngine, RequestHandlingError};
@@ -621,6 +622,17 @@ fn phase3_entry(term: &str, object: &str) -> IndexEntry {
     .expect("phase3 test entry should be valid")
 }
 
+fn ready_state(candidate: &BuildCandidate) -> IndexVersionState {
+    let mut state = IndexVersionState::new(candidate.version().clone());
+    state
+        .transition_to(VersionLifecycle::Validating)
+        .expect("candidate state should enter validation");
+    state
+        .mark_ready()
+        .expect("candidate state should become ready");
+    state
+}
+
 fn phase3_candidate(index_seed: u8, version: &str, entries: Vec<IndexEntry>) -> BuildCandidate {
     let definition = phase3_definition();
 
@@ -677,6 +689,7 @@ fn phase3_build_update_and_explicit_publication_keep_active_state_separate() {
     let prepared = publisher
         .prepare(
             updated_candidate.clone(),
+            ready_state(&updated_candidate),
             &phase3_definition(),
             Some(base.version().id().clone()),
             Some(base.version().id().clone()),
@@ -684,7 +697,7 @@ fn phase3_build_update_and_explicit_publication_keep_active_state_separate() {
         .expect("updated candidate should be publication-eligible");
 
     let published = publisher
-        .publish(prepared, Some(base.clone()))
+        .publish(prepared, Some(base.clone()), None)
         .expect("explicit publication should succeed");
 
     assert_eq!(published.active().index_id(), &index_id);
@@ -827,17 +840,18 @@ fn phase3_rebuild_replays_post_snapshot_updates_before_publication() {
     assert_eq!(rebuilt.replayed_updates(), 3);
 
     let publisher = IndexPublisher::new();
+    let rebuilt_candidate = rebuilt.candidate().clone();
     let prepared = publisher
-        .prepare(
-            rebuilt.candidate().clone(),
+        .prepare_rebuild(
+            rebuilt,
+            ready_state(&rebuilt_candidate),
             &phase3_definition(),
-            Some(active_version.clone()),
             Some(active_version.clone()),
         )
         .expect("rebuilt candidate should be publication-eligible");
 
     let published = publisher
-        .publish(prepared, Some(active.clone()))
+        .publish(prepared, Some(active.clone()), Some(&journal))
         .expect("explicit publication should succeed");
 
     assert_eq!(published.active().version().id().as_str(), "index-v2");
@@ -863,7 +877,8 @@ fn phase3_stale_prepared_candidate_cannot_overwrite_a_newer_active_version() {
 
     let prepared_v2 = publisher
         .prepare(
-            candidate_v2,
+            candidate_v2.clone(),
+            ready_state(&candidate_v2),
             &definition,
             Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
             Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
@@ -872,7 +887,8 @@ fn phase3_stale_prepared_candidate_cannot_overwrite_a_newer_active_version() {
 
     let prepared_v3 = publisher
         .prepare(
-            candidate_v3,
+            candidate_v3.clone(),
+            ready_state(&candidate_v3),
             &definition,
             Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
             Some(IndexVersionId::new("index-v1").expect("version ID should be valid")),
@@ -880,11 +896,11 @@ fn phase3_stale_prepared_candidate_cannot_overwrite_a_newer_active_version() {
         .expect("v3 should be prepared against v1");
 
     let published_v3 = publisher
-        .publish(prepared_v3, Some(active_v1.clone()))
+        .publish(prepared_v3, Some(active_v1.clone()), None)
         .expect("v3 should publish against the original active version");
 
     let error = publisher
-        .publish(prepared_v2, Some(published_v3.active().clone()))
+        .publish(prepared_v2, Some(published_v3.active().clone()), None)
         .expect_err("stale prepared v2 must not overwrite v3");
 
     assert!(matches!(

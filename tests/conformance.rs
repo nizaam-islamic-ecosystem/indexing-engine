@@ -37,15 +37,16 @@ use nizaam_core::status::Status;
 use nizaam_indexing::build::{
     BatchExecutor, BatchOptions, BuildCandidate, BuildInput, BuildSnapshot, CandidateUpdater,
     IndexBuilder, IndexMutation, IndexPublisher, IndexRebuilder, PublicationError, RebuildInput,
-    UpdateJournal,
+    UpdateJournal, UpdateSequence,
 };
 use nizaam_indexing::identity::{
     IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
 };
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion, IndexVersionId,
-    KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryRequest, QueryResult,
-    SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
+    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryRequest,
+    QueryResult, SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
+    VersionLifecycle,
 };
 use nizaam_indexing::requirement::IndexRequirement;
 use nizaam_indexing::{IndexingEngine, IndexingRegistration, IndexingRuntime};
@@ -771,6 +772,17 @@ fn phase3_candidate(seed: u8, version: &str, entries: Vec<IndexEntry>) -> BuildC
         .expect("phase3 candidate should be valid")
 }
 
+fn ready_state(candidate: &BuildCandidate) -> IndexVersionState {
+    let mut state = IndexVersionState::new(candidate.version().clone());
+    state
+        .transition_to(VersionLifecycle::Validating)
+        .expect("candidate state should enter validation");
+    state
+        .mark_ready()
+        .expect("candidate state should become ready");
+    state
+}
+
 #[test]
 fn phase3_index_version_lifecycle_is_distinct_from_core_engine_lifecycle() {
     let engine = test_engine();
@@ -833,7 +845,8 @@ fn phase3_build_update_and_rebuild_boundaries_are_core_runtime_independent() {
                 ),
                 Some(updated.version().id().clone()),
                 Some(updated.version().id().clone()),
-            ),
+            )
+            .with_snapshot_sequence(UpdateSequence::new(1)),
             &journal,
         )
         .expect("rebuild should start");
@@ -889,11 +902,13 @@ fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_ide
         vec![phase3_entry("base", "doc:0")],
     );
     let candidate_v2 = phase3_candidate(0xA3, "phase3-v2", vec![phase3_entry("next", "doc:1")]);
+    let candidate_v2_state = ready_state(&candidate_v2);
 
     let active_version = active_v1.version().id().clone();
     let prepared = publisher
         .prepare(
             candidate_v2,
+            candidate_v2_state,
             &phase3_definition(),
             Some(active_version.clone()),
             Some(active_version.clone()),
@@ -901,7 +916,7 @@ fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_ide
         .expect("candidate should be publication-eligible");
 
     let published = publisher
-        .publish(prepared, Some(active_v1.clone()))
+        .publish(prepared, Some(active_v1.clone()), None)
         .expect("publication should succeed");
 
     assert_eq!(published.active().version().id().as_str(), "phase3-v2");
@@ -915,16 +930,15 @@ fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_ide
         "phase3-active-v1"
     );
 
-    let mismatched_active = phase3_candidate(
-        0xA4,
-        "phase3-active-v2",
-        vec![phase3_entry("other", "doc:9")],
-    );
+    let mismatched_active =
+        phase3_candidate(0xA4, "phase3-v2", vec![phase3_entry("other", "doc:9")]);
     let candidate_v3 = phase3_candidate(0xA3, "phase3-v3", vec![phase3_entry("v3", "doc:3")]);
+    let candidate_v3_state = ready_state(&candidate_v3);
 
     let prepared_v3 = publisher
         .prepare(
             candidate_v3,
+            candidate_v3_state,
             &phase3_definition(),
             Some(published.active().version().id().clone()),
             Some(published.active().version().id().clone()),
@@ -932,19 +946,10 @@ fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_ide
         .expect("v3 should be prepared against the published lineage");
 
     let error = publisher
-        .publish(prepared_v3, Some(mismatched_active))
+        .publish(prepared_v3, Some(mismatched_active), None)
         .expect_err("a different concrete index identity must be rejected");
 
-    // Publication must reject the mismatched active resource. The publication
-    // boundary may report the rejection through its validation-order-specific
-    // error variant, so conformance checks the rejection itself rather than
-    // coupling this test to one internal validation ordering.
-    assert!(matches!(
-        error,
-        PublicationError::IndexMismatch { .. }
-            | PublicationError::ActiveVersionChanged { .. }
-            | PublicationError::Versioning(_)
-    ));
+    assert!(matches!(error, PublicationError::IndexMismatch { .. }));
     assert_eq!(published.active().version().id().as_str(), "phase3-v2");
 }
 
