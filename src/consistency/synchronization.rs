@@ -238,10 +238,17 @@ impl SynchronizationSnapshot {
     /// still implemented by [`ConsistencyMode`]; this module supplies the
     /// observations and does not duplicate policy rules.
     ///
-    /// A `Current` request is rejected when both source-version observations are
-    /// present and differ. For the policy evaluator, the indexed source version
-    /// comes from the snapshot when available and otherwise falls back to the
-    /// source version recorded on the selected `IndexVersion`.
+    /// A `Current` request is rejected when source-version observations
+    /// conflict. The source version recorded by the selected `IndexVersion`
+    /// remains authoritative for the indexed state; a synchronization snapshot
+    /// must not override it with a conflicting observation.
+    ///
+    /// For `StaleAllowed`, a declared source-version requirement is evaluated
+    /// against the selected `IndexVersion` metadata. This prevents a snapshot
+    /// observation from making an incompatible selected version appear
+    /// compatible. The selected version metadata is also preferred for
+    /// result/evaluation reporting, with the snapshot observation used only when
+    /// the selected version does not record a source version.
     pub fn evaluate_with_policy(
         &self,
         mode: &ConsistencyMode,
@@ -266,10 +273,26 @@ impl SynchronizationSnapshot {
             return Err(ConsistencyPolicyError::CurrentSourceVersionMismatch { source, indexed });
         }
 
-        let indexed_source_version = self
-            .indexed_source_version
-            .as_ref()
-            .or_else(|| version.source_version());
+        let version_source_version = version.source_version();
+
+        if mode.is_current()
+            && let (Some(observed), Some(recorded)) =
+                (self.indexed_source_version.as_ref(), version_source_version)
+            && observed != recorded
+        {
+            return Err(ConsistencyPolicyError::CurrentSourceVersionMismatch {
+                source: recorded.clone(),
+                indexed: observed.clone(),
+            });
+        }
+
+        // The selected IndexVersion is the authoritative representation of the
+        // indexed state's source version. A snapshot observation must never
+        // override it, because doing so could make a consistency requirement
+        // appear satisfied by a source version that does not belong to the
+        // selected index version.
+        let indexed_source_version =
+            version_source_version.or(self.indexed_source_version.as_ref());
 
         mode.evaluate(
             version,
@@ -604,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_with_policy_uses_snapshot_indexed_source_version_for_required_constraint() {
+    fn evaluate_with_policy_rejects_snapshot_indexed_source_version_conflict() {
         let snapshot = SynchronizationSnapshot::from_sequences(sequence(10), sequence(8))
             .expect("lagged sequences should be valid")
             .with_source_versions(
@@ -624,9 +647,47 @@ mod tests {
             FreshnessPolicy::new(2).with_required_source_version(source_version("source-v2")),
         );
 
+        let error = snapshot
+            .evaluate_with_policy(&mode, &version, VersionLifecycle::Published)
+            .expect_err(
+                "a required source version must not be satisfied by a conflicting snapshot observation",
+            );
+
+        assert_eq!(
+            error,
+            ConsistencyPolicyError::Freshness(
+                crate::consistency::policy::FreshnessPolicyError::SourceVersionMismatch {
+                    required: source_version("source-v2"),
+                    actual: source_version("source-v1"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn evaluate_with_policy_uses_matching_snapshot_indexed_source_version() {
+        let snapshot = SynchronizationSnapshot::from_sequences(sequence(10), sequence(8))
+            .expect("lagged sequences should be valid")
+            .with_source_versions(
+                Some(source_version("source-v2")),
+                Some(source_version("source-v2")),
+            );
+
+        let version = IndexVersion::with_metadata(
+            IndexVersionId::new("v2").expect("test version ID should be valid"),
+            Some(source_version("source-v2")),
+            None,
+            None,
+        )
+        .expect("test version should be valid");
+
+        let mode = ConsistencyMode::stale_allowed(
+            FreshnessPolicy::new(2).with_required_source_version(source_version("source-v2")),
+        );
+
         let evaluation = snapshot
             .evaluate_with_policy(&mode, &version, VersionLifecycle::Published)
-            .expect("snapshot indexed source version should satisfy the required version");
+            .expect("matching selected-version and snapshot source versions should satisfy the requirement");
 
         assert_eq!(
             evaluation.indexed_source_version(),
