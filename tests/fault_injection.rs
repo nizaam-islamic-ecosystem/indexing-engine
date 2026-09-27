@@ -1,4 +1,4 @@
-//! Level 3 deterministic fault-injection coverage for Phase 3.
+//! Deterministic fault-injection coverage for Phase 3, Phase 4, and Phase 5.
 //!
 //! Faults are injected through real public logical APIs using invalid or
 //! conflicting inputs. No provider/storage implementation is fabricated here,
@@ -16,6 +16,12 @@ use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersionId,
     IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
     TargetReferenceType, Uniqueness, VersionLifecycle,
+};
+use nizaam_indexing::{
+    CapacityAccounting, CapacityAdmissionError, CapacityOperation, CapacityRequest,
+    ConfigurationValidationError, FailureClass, IndexLifecycle, IndexLifecycleState,
+    IndexingConfiguration, IntegrityValidationError, IntegrityValidator, RecoveryAction,
+    RecoveryRequest, action_for, classify,
 };
 
 fn index_id(seed: u8) -> IndexId {
@@ -844,4 +850,126 @@ fn phase4_heterogeneous_hybrid_results_are_rejected_instead_of_returning_mislead
             nizaam_indexing::query::RetrievalPlanValidationError::HeterogeneousHybridResultTargets
         )
     ));
+}
+
+// -----------------------------------------------------------------------------
+// Phase 5 deterministic fault-injection coverage
+// -----------------------------------------------------------------------------
+
+#[test]
+fn phase5_integrity_fault_rejects_source_version_incompatibility() {
+    let definition = definition();
+    let incompatible = nizaam_indexing::index::IndexVersion::with_metadata(
+        version_id("index-v9"),
+        Some(source_version("source-v9")),
+        Some(schema_version("schema-v1")),
+        None,
+    )
+    .expect("incompatible version should still be structurally valid");
+
+    let error = IntegrityValidator::new()
+        .validate_version_compatibility(&incompatible, &definition)
+        .expect_err("incompatible source version must be rejected");
+
+    assert!(matches!(
+        error,
+        IntegrityValidationError::VersionCompatibility(_)
+    ));
+}
+
+#[test]
+fn phase5_capacity_fault_rejects_oversized_batch_without_consuming_capacity() {
+    let configuration =
+        IndexingConfiguration::new(1, 1, 1, 1, 1, 2, 4, 2).expect("configuration should be valid");
+    let accounting = CapacityAccounting::from_configuration(configuration);
+
+    let error = accounting
+        .try_acquire(CapacityRequest::with_batch_size(
+            CapacityOperation::Build,
+            1,
+            3,
+        ))
+        .expect_err("batch size above the configured bound must be rejected");
+
+    assert!(matches!(
+        error,
+        CapacityAdmissionError::BatchSizeExceeded {
+            requested: 3,
+            limit: 2,
+        }
+    ));
+    assert_eq!(accounting.usage().active_builds(), 0);
+    assert_eq!(accounting.usage().consumed_capacity_units(), 0);
+}
+
+#[test]
+fn phase5_lifecycle_fault_cannot_bypass_required_index_readiness() {
+    let id = index_id(0xb1);
+    let mut lifecycle = IndexLifecycle::new(id);
+
+    let error = lifecycle
+        .transition_to(IndexLifecycleState::Active)
+        .expect_err("Creating -> Active must be rejected");
+
+    assert_eq!(error.index_id(), id);
+    assert_eq!(error.from(), IndexLifecycleState::Creating);
+    assert_eq!(error.to(), IndexLifecycleState::Active);
+    assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
+}
+
+#[test]
+fn phase5_configuration_fault_is_rejected_before_capacity_limits_are_created() {
+    let error = IndexingConfiguration::new(0, 1, 1, 1, 1, 2, 4, 2)
+        .expect_err("zero query concurrency must be rejected");
+
+    assert_eq!(
+        error,
+        ConfigurationValidationError::ZeroValue {
+            field: nizaam_indexing::ConfigurationField::MaxConcurrentQueries,
+        }
+    );
+}
+
+#[test]
+fn phase5_recovery_fault_preserves_active_lineage_and_selects_deterministic_action() {
+    let active = version_id("active-v7");
+    let request = RecoveryRequest::new(classify(FailureClass::CorruptIndex))
+        .with_active_version(active.clone());
+
+    assert_eq!(request.action(), RecoveryAction::Rebuild);
+    assert_eq!(
+        action_for(FailureClass::CorruptIndex),
+        RecoveryAction::Rebuild
+    );
+    assert_eq!(request.active_version(), Some(&active));
+}
+
+#[test]
+fn phase5_recovery_fault_mapping_keeps_operational_failures_separate_from_lifecycle_state() {
+    let cases = [
+        (FailureClass::StaleIndex, RecoveryAction::Synchronize),
+        (
+            FailureClass::UnavailableIndex,
+            RecoveryAction::RestoreAvailability,
+        ),
+        (FailureClass::ResourceExhaustion, RecoveryAction::Throttle),
+        (
+            FailureClass::SourceDataFailure,
+            RecoveryAction::PreserveSafeState,
+        ),
+        (
+            FailureClass::ProviderFailure,
+            RecoveryAction::DelegateToCoreRetry,
+        ),
+    ];
+
+    for (failure, expected) in cases {
+        let request = RecoveryRequest::new(classify(failure));
+
+        assert_eq!(request.action(), expected);
+        assert_eq!(action_for(failure), expected);
+    }
+
+    let lifecycle = IndexLifecycle::new(index_id(0xb2));
+    assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
 }

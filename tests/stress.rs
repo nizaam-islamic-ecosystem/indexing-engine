@@ -1,10 +1,12 @@
-//! Level 3 lifecycle-pressure tests for the Phase 3 logical build system.
+//! Lifecycle and operational-pressure tests for the Phase 3 and Phase 5 logical
+//! indexing system.
 //!
 //! These are correctness stress tests, not benchmarks. They exercise many
 //! independent candidates, repeated bounded chunks, replay pressure, and
 //! concurrent stateless construction without freezing a synchronization
 //! primitive or introducing provider/storage assumptions.
 
+use std::sync::Barrier;
 use std::thread;
 
 use nizaam_indexing::build::{
@@ -18,6 +20,10 @@ use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersionId,
     IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
     TargetReferenceType, Uniqueness, VersionLifecycle,
+};
+use nizaam_indexing::{
+    CapacityAccounting, CapacityOperation, CapacityRequest, IndexingConfiguration,
+    IntegrityValidator,
 };
 
 fn index_id(seed: u8) -> IndexId {
@@ -737,4 +743,130 @@ fn phase4_slow_provider_retrieval_remains_bounded_and_completes_under_concurrent
     }
 
     assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
+}
+
+// -----------------------------------------------------------------------------
+// Phase 5 operational-pressure coverage
+// -----------------------------------------------------------------------------
+
+#[test]
+fn phase5_capacity_admission_remains_bounded_under_concurrent_pressure() {
+    let configuration =
+        IndexingConfiguration::new(4, 1, 1, 1, 8, 8, 4, 4).expect("configuration should be valid");
+    let accounting = Arc::new(CapacityAccounting::from_configuration(configuration));
+    // Synchronize every worker after admission so successful leases remain
+    // held while all admission attempts are in flight. This measures the
+    // concurrent bound rather than the eventual number of successful attempts.
+    let worker_count = 8usize;
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let accounting = Arc::clone(&accounting);
+        let barrier = Arc::clone(&barrier);
+
+        handles.push(thread::spawn(move || {
+            match accounting.try_acquire(CapacityRequest::new(CapacityOperation::Query, 1)) {
+                Ok(lease) => {
+                    barrier.wait();
+                    drop(lease);
+                    true
+                }
+                Err(_) => {
+                    barrier.wait();
+                    false
+                }
+            }
+        }));
+    }
+
+    let mut admitted = 0usize;
+    for handle in handles {
+        if handle.join().expect("capacity worker should complete") {
+            admitted += 1;
+        }
+    }
+
+    assert_eq!(admitted, 4);
+    assert_eq!(accounting.usage().active_operations(), 0);
+    assert_eq!(accounting.usage().consumed_capacity_units(), 0);
+}
+
+#[test]
+fn phase5_integrity_validation_remains_stateless_under_concurrent_pressure() {
+    let candidate = build_candidate(
+        0xb1,
+        "phase5-integrity-pressure",
+        vec![
+            entry("term-1", "doc:1"),
+            entry("term-2", "doc:2"),
+            entry("term-3", "doc:3"),
+        ],
+    );
+    let definition = candidate.definition().clone();
+    let version = candidate.version().clone();
+    let entries = candidate.entries().to_vec();
+
+    let workers = 16usize;
+    let mut handles = Vec::with_capacity(workers);
+
+    for _ in 0..workers {
+        let definition = definition.clone();
+        let version = version.clone();
+        let entries = entries.clone();
+
+        handles.push(thread::spawn(move || {
+            IntegrityValidator::new()
+                .validate_index(&definition, &version, entries.iter())
+                .expect("concurrent logical integrity validation should succeed");
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("integrity worker should complete without panic");
+    }
+}
+
+#[test]
+fn phase5_independent_lifecycle_pressure_does_not_share_index_state() {
+    let workers = 16usize;
+    let mut handles = Vec::with_capacity(workers);
+
+    for worker in 0..workers {
+        handles.push(thread::spawn(move || {
+            let mut lifecycle = nizaam_indexing::IndexLifecycle::new(index_id(0xc0 + worker as u8));
+
+            lifecycle
+                .mark_building()
+                .expect("Creating -> Building should be valid");
+            lifecycle
+                .mark_validating()
+                .expect("Building -> Validating should be valid");
+            lifecycle
+                .mark_ready()
+                .expect("Validating -> Ready should be valid");
+            lifecycle
+                .mark_active()
+                .expect("Ready -> Active should be valid");
+
+            assert!(lifecycle.is_active());
+            lifecycle
+                .mark_retiring()
+                .expect("Active -> Retiring should be valid");
+            lifecycle
+                .mark_retired()
+                .expect("Retiring -> Retired should be valid");
+
+            lifecycle.state()
+        }));
+    }
+
+    for handle in handles {
+        assert_eq!(
+            handle.join().expect("lifecycle worker should complete"),
+            nizaam_indexing::IndexLifecycleState::Retired
+        );
+    }
 }

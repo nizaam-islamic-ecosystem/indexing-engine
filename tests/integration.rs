@@ -1,4 +1,5 @@
-//! Repository-level integration tests for the Phase 0 and Phase 2 public API.
+//! Repository-level integration tests for the Phase 0, Phase 2, Phase 3, Phase 4,
+//! and Phase 5 public API.
 //!
 //! Phase 0 coverage preserves the complete Core-backed execution path:
 //!
@@ -78,7 +79,12 @@ use nizaam_indexing::index::{
 };
 use nizaam_indexing::query::QueryRequest;
 use nizaam_indexing::requirement::IndexRequirement;
-use nizaam_indexing::{IndexingEngine, RequestHandlingError};
+use nizaam_indexing::{
+    CapacityAccounting, CapacityOperation, CapacityRequest, FailureClass, IndexEvent,
+    IndexEventResponse, IndexLifecycle, IndexLifecycleState, IndexingConfiguration, IndexingEngine,
+    IntegrityValidationError, IntegrityValidator, RecoveryAction, RecoveryRequest,
+    RequestHandlingError, action_for, classify,
+};
 
 fn request_envelope(
     engine: &IndexingEngine,
@@ -1405,4 +1411,171 @@ fn phase4_hybrid_query_composes_into_a_reference_result_without_domain_hydration
     assert_eq!(result.hits().len(), 1);
     assert_eq!(result.hits()[0].reference().object_reference(), "object-42");
     assert_eq!(provider.calls(), vec!["hybrid"]);
+}
+
+// -----------------------------------------------------------------------------
+// Phase 5 operational integration coverage
+// -----------------------------------------------------------------------------
+
+#[test]
+fn phase5_build_validate_capacity_and_publication_compose_without_merging_ownership() {
+    let candidate = phase3_candidate(
+        0xb1,
+        "integration.phase5.v1",
+        vec![
+            phase3_entry("alpha", "doc:1"),
+            phase3_entry("beta", "doc:2"),
+        ],
+    );
+
+    IntegrityValidator::new()
+        .validate_index(
+            candidate.definition(),
+            candidate.version(),
+            candidate.entries().iter(),
+        )
+        .expect("candidate should pass logical integrity validation");
+
+    let configuration =
+        IndexingConfiguration::new(2, 1, 1, 1, 2, 4, 8, 4).expect("configuration should be valid");
+    let accounting = CapacityAccounting::from_configuration(configuration);
+    let lease = accounting
+        .try_acquire(CapacityRequest::new(CapacityOperation::Build, 2))
+        .expect("build should pass local capacity admission");
+
+    assert_eq!(accounting.usage().active_builds(), 1);
+    drop(lease);
+    assert_eq!(accounting.usage().active_builds(), 0);
+
+    let publisher = IndexPublisher::new();
+    let prepared = publisher
+        .prepare(
+            candidate.clone(),
+            ready_state(&candidate),
+            candidate.definition(),
+            None,
+            None,
+        )
+        .expect("validated candidate should prepare for publication");
+
+    let publication = publisher
+        .publish(prepared, None, None)
+        .expect("prepared candidate should publish");
+
+    assert_eq!(
+        publication.active().version().id().as_str(),
+        "integration.phase5.v1"
+    );
+
+    let mut lifecycle = IndexLifecycle::new(*candidate.index_id());
+    lifecycle
+        .mark_building()
+        .expect("Creating -> Building should be valid");
+    lifecycle
+        .mark_validating()
+        .expect("Building -> Validating should be valid");
+    lifecycle
+        .mark_ready()
+        .expect("Validating -> Ready should be valid");
+    lifecycle
+        .mark_active()
+        .expect("Ready -> Active should be valid");
+    assert_eq!(lifecycle.state(), IndexLifecycleState::Active);
+}
+
+#[test]
+fn phase5_integrity_failure_blocks_an_incompatible_candidate_before_publication() {
+    let definition = phase3_definition();
+    let incompatible = IndexVersion::with_metadata(
+        IndexVersionId::new("integration.phase5.incompatible").expect("version ID should be valid"),
+        Some(SourceVersion::new("source-v9").expect("source version should be valid")),
+        Some(SchemaVersion::new("schema-v3").expect("schema version should be valid")),
+        None,
+    )
+    .expect("version should be structurally valid");
+
+    let error = IntegrityValidator::new()
+        .validate_version_compatibility(&incompatible, &definition)
+        .expect_err("source-version mismatch must stop the candidate");
+
+    assert!(matches!(
+        error,
+        IntegrityValidationError::VersionCompatibility(_)
+    ));
+}
+
+#[test]
+fn phase5_recovery_keeps_the_known_good_active_version_observationally_protected() {
+    let active = IndexVersionId::new("integration.phase5.active-v7")
+        .expect("active version ID should be valid");
+    let request = RecoveryRequest::new(classify(FailureClass::CorruptIndex))
+        .with_active_version(active.clone());
+
+    assert_eq!(request.action(), RecoveryAction::Rebuild);
+    assert_eq!(
+        action_for(FailureClass::CorruptIndex),
+        RecoveryAction::Rebuild
+    );
+    assert_eq!(request.active_version(), Some(&active));
+
+    // Recovery receives the active version only as lineage/protection context.
+    // No mutation API is exposed by RecoveryRequest.
+    assert_eq!(active.as_str(), "integration.phase5.active-v7");
+}
+
+#[test]
+fn phase5_index_event_and_response_stay_inside_the_existing_core_request_boundary() {
+    let capability_id = CapabilityId::new("nizaam.indexing.integration.phase5.event")
+        .expect("capability ID should be valid");
+    let operation = operation_context("integration-phase5-event");
+    let request = universal_request(request_envelope(
+        &test_engine(),
+        operation.clone(),
+        capability_id,
+        "integration-phase5-event-message",
+        b"source-owned-payload",
+    ));
+
+    let event_id = request.event_id().clone();
+    let message_id = request.message_id().clone();
+
+    let requirement = IndexRequirement::new(
+        phase2_namespace("integration.phase5.event"),
+        IndexFamily::Inverted,
+        phase2_key_definition(&["term"]),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        None,
+        None,
+    )
+    .expect("requirement should be valid");
+
+    let event = IndexEvent::new(
+        request,
+        requirement,
+        phase2_reference("source", "object:1"),
+        KeyMaterial::text("term"),
+    )
+    .expect("IndexEvent should be valid");
+
+    assert_eq!(event.event_id(), &event_id);
+    assert_eq!(event.message_id(), &message_id);
+    assert_eq!(event.operation_context(), &operation);
+    assert_eq!(event.source_payload(), b"source-owned-payload");
+
+    let response = IndexEventResponse::with_version(
+        phase2_index_id(0xb2),
+        IndexVersionId::new("integration.phase5.response-v1")
+            .expect("response version ID should be valid"),
+    );
+
+    assert_eq!(response.index_id(), &phase2_index_id(0xb2));
+    assert_eq!(
+        response
+            .version()
+            .expect("response should carry logical version metadata")
+            .as_str(),
+        "integration.phase5.response-v1"
+    );
 }

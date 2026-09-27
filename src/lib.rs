@@ -1,7 +1,8 @@
 //! Public library boundary for the Nizaam Indexing Engine.
 //!
 //! The crate root exposes the established Indexing module tree and the public
-//! logical contracts implemented across Phase 1, Phase 2, Phase 3, and Phase 4.
+//! logical contracts implemented across Phase 1, Phase 2, Phase 3, Phase 4,
+//! and Phase 5.
 //!
 //! The public boundary keeps ownership explicit:
 //! - `identity` defines Indexing identities and logical namespaces.
@@ -13,6 +14,18 @@
 //! - `query` defines the canonical Phase 4 logical query, planning, retrieval,
 //!   and reference-oriented result contracts.
 //! - `requirement` defines the source-to-Indexing requirement contract.
+//! - `lifecycle` defines the lifecycle of individual logical indexes without
+//!   replacing Core's engine lifecycle.
+//! - `configuration` defines Indexing-owned operational configuration values
+//!   while Core remains the configuration infrastructure owner.
+//! - `capacity` defines bounded Indexing workload admission and local
+//!   consumption accounting.
+//! - `integrity` defines logical metadata, entry, reference, version, and
+//!   publication-precondition validation.
+//! - `recovery` defines Indexing failure classification and local recovery
+//!   execution without replacing Core retry policy.
+//! - `event` defines the typed Indexing event/result content carried through
+//!   Core's existing universal request/response infrastructure.
 //! - Core-owned runtime, capability, lifecycle, contract, and execution
 //!   infrastructure remains owned by `nizaam-core` and is surfaced here only
 //!   through the Indexing engine API where required.
@@ -27,6 +40,7 @@ pub mod configuration;
 pub mod consistency;
 pub mod engine;
 pub mod error;
+pub mod event;
 pub mod identity;
 pub mod index;
 pub mod integrity;
@@ -66,6 +80,53 @@ pub use index::{
     Uniqueness, VersionLifecycle, VersionLifecycleTransitionError, VersionValueValidationError,
 };
 pub use requirement::{IndexRequirement, IndexRequirementValidationError};
+
+// -----------------------------------------------------------------------------
+// Phase 5 lifecycle public surface
+// -----------------------------------------------------------------------------
+
+pub use lifecycle::{IndexLifecycle, IndexLifecycleState, IndexLifecycleTransitionError};
+
+// -----------------------------------------------------------------------------
+// Phase 5 configuration public surface
+// -----------------------------------------------------------------------------
+
+pub use configuration::{ConfigurationField, ConfigurationValidationError, IndexingConfiguration};
+
+// -----------------------------------------------------------------------------
+// Phase 5 capacity public surface
+// -----------------------------------------------------------------------------
+
+pub use capacity::{
+    CapacityAccounting, CapacityAdmissionError, CapacityLease, CapacityLimits, CapacityOperation,
+    CapacityRequest, CapacityUsageSnapshot, CapacityWaiterError, CapacityWaiterGuard,
+};
+
+// -----------------------------------------------------------------------------
+// Phase 5 integrity public surface
+// -----------------------------------------------------------------------------
+
+pub use integrity::{
+    IntegrityResult, IntegrityValidationError, IntegrityValidator, validate_definition,
+    validate_entry, validate_publication_preconditions, validate_reference, validate_version,
+    validate_version_compatibility,
+};
+
+// -----------------------------------------------------------------------------
+// Phase 5 recovery public surface
+// -----------------------------------------------------------------------------
+
+pub use recovery::{
+    ClassifiedFailure, FailureClass, FailureClassifier, RecoveryAction, RecoveryExecutionError,
+    RecoveryExecutor, RecoveryHandler, RecoveryOutcome, RecoveryRequest, action_for, classify,
+    execute_recovery, retryability,
+};
+
+// -----------------------------------------------------------------------------
+// Phase 5 event public surface
+// -----------------------------------------------------------------------------
+
+pub use event::{IndexEvent, IndexEventResponse, IndexEventResult, IndexEventValidationError};
 
 // -----------------------------------------------------------------------------
 // Phase 4 consistency public surface

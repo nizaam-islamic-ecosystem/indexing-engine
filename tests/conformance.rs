@@ -1,4 +1,4 @@
-//! Phase 2 + Phase 3 architectural conformance tests.
+//! Phase 2 + Phase 3 + Phase 5 architectural conformance tests.
 //!
 //! These tests protect the boundaries established between `nizaam-indexing`
 //! and `nizaam-core`. They preserve the Phase 0 runtime/capability checks while
@@ -49,7 +49,12 @@ use nizaam_indexing::index::{
     TargetReferenceType, Uniqueness, VersionLifecycle,
 };
 use nizaam_indexing::requirement::IndexRequirement;
-use nizaam_indexing::{IndexingEngine, IndexingRegistration, IndexingRuntime};
+use nizaam_indexing::{
+    CapacityAccounting, CapacityAdmissionError, CapacityOperation, CapacityRequest, FailureClass,
+    IndexEvent, IndexEventResponse, IndexLifecycle, IndexLifecycleState, IndexingConfiguration,
+    IndexingEngine, IndexingRegistration, IndexingRuntime, IntegrityValidator, RecoveryAction,
+    RecoveryRequest, action_for, classify,
+};
 
 fn core_shutdown_token(_: &nizaam_core::runtime::CancellationToken) {}
 
@@ -1472,4 +1477,160 @@ fn phase4_stale_allowed_policy_constraints_remain_indexing_owned() {
     .expect("stale request should be valid");
 
     assert_eq!(request.consistency().freshness_policy(), Some(&policy));
+}
+
+// -----------------------------------------------------------------------------
+// Phase 5 architectural conformance coverage
+// -----------------------------------------------------------------------------
+
+#[test]
+fn phase5_index_lifecycle_is_local_and_does_not_control_core_runtime_lifecycle() {
+    let engine = test_engine();
+    let mut lifecycle = IndexLifecycle::new(phase2_index_id(0xb1));
+
+    assert_eq!(engine.runtime().state(), LifecycleState::Created);
+    assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
+
+    lifecycle
+        .mark_building()
+        .expect("Creating -> Building should be valid");
+    lifecycle
+        .mark_validating()
+        .expect("Building -> Validating should be valid");
+    lifecycle
+        .mark_ready()
+        .expect("Validating -> Ready should be valid");
+    lifecycle
+        .mark_active()
+        .expect("Ready -> Active should be valid");
+
+    assert_eq!(lifecycle.state(), IndexLifecycleState::Active);
+    assert_eq!(engine.runtime().state(), LifecycleState::Created);
+}
+
+#[test]
+fn phase5_capacity_is_a_local_admission_boundary_not_a_scheduler() {
+    let configuration =
+        IndexingConfiguration::new(1, 1, 1, 1, 1, 4, 4, 2).expect("configuration should be valid");
+    let accounting = CapacityAccounting::from_configuration(configuration);
+
+    let lease = accounting
+        .try_acquire(CapacityRequest::new(CapacityOperation::Query, 1))
+        .expect("first query should be admitted");
+
+    let rejected = accounting.try_acquire(CapacityRequest::new(CapacityOperation::Query, 1));
+    assert!(matches!(
+        rejected,
+        Err(CapacityAdmissionError::ConcurrencyLimitReached {
+            operation: CapacityOperation::Query,
+            current: 1,
+            limit: 1,
+        })
+    ));
+
+    assert_eq!(accounting.usage().active_queries(), 1);
+    drop(lease);
+    assert_eq!(accounting.usage().active_queries(), 0);
+    assert_eq!(accounting.usage().consumed_capacity_units(), 0);
+}
+
+#[test]
+fn phase5_integrity_validation_is_provider_neutral_and_does_not_repair_storage() {
+    let definition = IndexDefinition::new(
+        IndexDefinitionIdentity::new(
+            phase2_definition_id("phase5.conformance.integrity"),
+            phase2_namespace("phase5.conformance"),
+            IndexFamily::Inverted,
+        ),
+        phase2_key_definition(),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        None,
+        None,
+    )
+    .expect("definition should be valid");
+    let version = phase2_index_version("phase5-integrity-v1");
+    let entry = IndexEntry::new(
+        KeyMaterial::text("term"),
+        phase2_object_reference("source", "opaque-object"),
+    )
+    .expect("entry should be valid");
+
+    IntegrityValidator::new()
+        .validate_index(&definition, &version, std::iter::once(&entry))
+        .expect("logical state should pass without any provider/storage dependency");
+}
+
+#[test]
+fn phase5_recovery_delegates_retry_authority_to_core_instead_of_creating_a_retry_loop() {
+    let active = IndexVersionId::new("phase5-active-v1").expect("version ID should be valid");
+    let request = RecoveryRequest::new(classify(FailureClass::ProviderFailure))
+        .with_active_version(active.clone());
+
+    assert_eq!(request.action(), RecoveryAction::DelegateToCoreRetry);
+    assert_eq!(
+        action_for(FailureClass::ProviderFailure),
+        RecoveryAction::DelegateToCoreRetry
+    );
+    assert_eq!(request.active_version(), Some(&active));
+    assert!(FailureClass::ProviderFailure.may_retry());
+}
+
+#[test]
+fn phase5_index_event_reuses_core_identity_and_response_remains_indexing_content() {
+    let capability_id = CapabilityId::new("nizaam.indexing.conformance.phase5.event")
+        .expect("capability ID should be valid");
+    let operation = operation_context("phase5-event-conformance");
+    let request = universal_request(envelope(
+        engine_id("nizaam.source.phase5"),
+        engine_id("nizaam.indexing.conformance"),
+        operation.clone(),
+        capability_id,
+        Interaction::Request,
+        "phase5-event-message",
+        b"source-owned-payload",
+    ));
+
+    let event_id = request.event_id().clone();
+    let message_id = request.message_id().clone();
+
+    let requirement = IndexRequirement::new(
+        phase2_namespace("phase5.event"),
+        IndexFamily::Inverted,
+        phase2_key_definition(),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        None,
+        None,
+    )
+    .expect("requirement should be valid");
+
+    let event = IndexEvent::new(
+        request,
+        requirement,
+        phase2_object_reference("source", "object:1"),
+        KeyMaterial::text("term"),
+    )
+    .expect("IndexEvent should be valid");
+
+    assert_eq!(event.event_id(), &event_id);
+    assert_eq!(event.message_id(), &message_id);
+    assert_eq!(event.operation_context(), &operation);
+    assert_eq!(event.source_engine_id().as_str(), "nizaam.source.phase5");
+    assert_eq!(event.source_payload(), b"source-owned-payload");
+
+    let response = IndexEventResponse::with_version(
+        phase2_index_id(0xb2),
+        IndexVersionId::new("phase5-response-v1").expect("version ID should be valid"),
+    );
+    assert_eq!(response.index_id(), &phase2_index_id(0xb2));
+    assert_eq!(
+        response
+            .version()
+            .expect("logical version should exist")
+            .as_str(),
+        "phase5-response-v1"
+    );
 }
