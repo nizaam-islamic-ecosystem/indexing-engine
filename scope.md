@@ -9478,7 +9478,6 @@ verification pipeline.
 
 - [x] Previously verified Phase 1 and Phase 2 behavior remains intact.
 
-
 - [x] Rebuild callers can explicitly bind a source snapshot to a journal
   sequence with `RebuildInput::with_snapshot_sequence`.
 
@@ -11889,7 +11888,7 @@ That gives the Indexing Engine a clean generic retrieval layer that can serve mu
 
 #### Status
 
-**In Progress**
+**Completed**
 
 #### Approved Cross-Phase Architecture Update
 
@@ -12646,7 +12645,7 @@ Planned structure:
 src/recovery/
 ├── mod.rs
 ├── failure.rs
-└── recovery.rs
+└── execution.rs
 ```
 
 ##### `recovery/failure.rs`
@@ -13832,74 +13831,74 @@ Domain semantic recovery engine
 
 The following invariants should be treated as implementation requirements:
 
-- [ ] Index lifecycle is independent from Core engine lifecycle.
+- [x] Index lifecycle is independent from Core engine lifecycle.
 
-- [ ] Health does not own lifecycle.
+- [x] Health does not own lifecycle.
 
-- [ ] Index state does not automatically equal engine state.
+- [x] Index state does not automatically equal engine state.
 
-- [ ] Capacity behavior is bounded.
+- [x] Capacity behavior is bounded.
 
-- [ ] Query pressure is bounded.
+- [x] Query pressure is bounded.
 
-- [ ] Build/rebuild pressure is bounded.
+- [x] Build/rebuild pressure is bounded.
 
-- [ ] Throttling does not silently corrupt index state.
+- [x] Throttling does not silently corrupt index state.
 
-- [ ] Integrity validation is separate from physical storage.
+- [x] Integrity validation is separate from physical storage.
 
-- [ ] Invalid index state cannot become active.
+- [x] Invalid index state cannot become active.
 
-- [ ] Stale and corrupt indexes are distinguishable.
+- [x] Stale and corrupt indexes are distinguishable.
 
-- [ ] Unavailable and corrupt indexes are distinguishable.
+- [x] Unavailable and corrupt indexes are distinguishable.
 
-- [ ] Source-data failure is distinguishable from provider failure.
+- [x] Source-data failure is distinguishable from provider failure.
 
-- [ ] Resource exhaustion is distinguishable from provider failure.
+- [x] Resource exhaustion is distinguishable from provider failure.
 
-- [ ] Failure classification is separate from retry policy.
+- [x] Failure classification is separate from retry policy.
 
-- [ ] Recovery is separate from retry.
+- [x] Recovery is separate from retry.
 
-- [ ] Core retry mechanisms are reused where appropriate.
+- [x] Core retry mechanisms are reused where appropriate.
 
-- [ ] Rebuild-based recovery reuses Phase 3 construction/publication.
+- [x] Rebuild-based recovery reuses Phase 3 construction/publication.
 
-- [ ] Active known-good versions remain protected during recovery.
+- [x] Active known-good versions remain protected during recovery.
 
-- [ ] Configuration does not silently select deferred physical technologies.
+- [x] Configuration does not silently select deferred physical technologies.
 
-- [ ] Health/readiness observations do not become a second Control Plane.
+- [x] Health/readiness observations do not become a second Control Plane.
 
-- [ ] No second runtime is introduced.
+- [x] No second runtime is introduced.
 
-- [ ] No global scheduler is introduced.
+- [x] No global scheduler is introduced.
 
-- [ ] Domain semantics do not enter lifecycle, capacity,
+- [x] Domain semantics do not enter lifecycle, capacity,
   integrity, or recovery.
 
-- [ ] Physical provider details remain behind the provider boundary.
+- [x] Physical provider details remain behind the provider boundary.
 
-- [ ] Indexing is library-only; no standalone Indexing binary is required.
+- [x] Indexing is library-only; no standalone Indexing binary is required.
 
-- [ ] IndexEvent uses Core `UniversalEvent` rather than creating a parallel event transport.
+- [x] IndexEvent uses Core `UniversalEvent` rather than creating a parallel event transport.
 
-- [ ] UniversalRequest remains the inbound request interaction.
+- [x] UniversalRequest remains the inbound request interaction.
 
-- [ ] UniversalResponse remains the outbound response interaction.
+- [x] UniversalResponse remains the outbound response interaction.
 
-- [ ] Source EngineId / EngineInstanceId are taken from the Core participant boundary rather than duplicated unnecessarily.
+- [x] Source EngineId / EngineInstanceId are taken from the Core participant boundary rather than duplicated unnecessarily.
 
-- [ ] Core OperationId / CorrelationId / EngineContext remain the authoritative execution-context boundary.
+- [x] Core OperationId / CorrelationId / EngineContext remain the authoritative execution-context boundary.
 
-- [ ] Source-owned word / semantic / context data remains source-owned payload content.
+- [x] Source-owned word / semantic / context data remains source-owned payload content.
 
-- [ ] Successful IndexEvent processing returns an `IndexId` rather than a physical storage identifier.
+- [x] Successful IndexEvent processing returns an `IndexId` rather than a physical storage identifier.
 
-- [ ] IndexEvent communication does not create a second event bus, scheduler, transport, or retry framework.
+- [x] IndexEvent communication does not create a second event bus, scheduler, transport, or retry framework.
 
-- [ ] Phase 1–4 behavior remains intact.
+- [x] Phase 1–4 behavior remains intact.
 
 ---
 
@@ -13907,77 +13906,186 @@ The following invariants should be treated as implementation requirements:
 
 Phase 5 is complete when the Indexing Engine has:
 
+#### Phase 5 Implementation Completed: What Was Done and Decisions Made
+
+Phase 5 has now been implemented as the operational safety layer around the
+Phase 1–4 indexing contracts. The implementation was compared against the
+repository source modules and repository-level tests before marking this phase
+complete.
+
+##### What was implemented
+
+- Implemented an independent index lifecycle state machine with guarded
+  transitions from `Creating` through `Retired`, without coupling index state
+  to the Core engine lifecycle.
+- Implemented bounded local capacity limits and accounting for query, build,
+  maintenance, and recovery workloads, including batch limits, per-operation
+  capacity limits, aggregate capacity limits, bounded pending waiters, and
+  RAII-based reservation release.
+- Implemented logical integrity validation for definitions, versions,
+  entries, object references, reference-type contracts, version
+  compatibility, candidate lineage, and publication preconditions.
+- Implemented explicit failure classification for invalid, stale, unavailable,
+  corrupt, source-data, resource-exhaustion, provider, and query failures.
+- Implemented deterministic recovery action selection and a typed recovery
+  execution boundary. Provider retry remains delegated to Core rather than
+  being recreated in Indexing.
+- Protected the last known-good active version by keeping it observational
+  recovery context rather than exposing a recovery mutation operation for it.
+- Implemented validated Indexing configuration values and their projection
+  into capacity limits while preserving Core ownership of the configuration
+  lifecycle/update infrastructure.
+- Implemented the typed `IndexEvent` and `IndexEventResponse` contracts on
+  top of Core universal request/event/response infrastructure.
+- Implemented event-boundary validation for source identity, operation
+  context, indexing requirements, references, key material, protocol role,
+  and provider-neutral logical input.
+- Integrated the Phase 5 typed event boundary with the existing Core-backed
+  engine facade: Core lifecycle admission, target engine/instance checks,
+  IndexEvent validation, local capacity admission, and Core capability
+  dispatch.
+- Added and updated Phase 5 unit, module-level, integration, conformance,
+  fault-injection, and stress coverage without removing existing test cases.
+- Preserved the Phase 1–4 contracts and their provider-neutral/domain-neutral
+  boundaries.
+
+##### Architectural decisions finalized during Phase 5
+
+1. **Indexing remains library-only.** No standalone Indexing binary is
+   introduced or required.
+2. **Core remains authoritative for engine infrastructure.** Engine lifecycle,
+   runtime admission, capability dispatch, universal request/response/event
+   infrastructure, retry, and configuration lifecycle are reused rather than
+   duplicated.
+3. **Index lifecycle is independent from engine lifecycle.** Operational
+   conditions such as stale, unavailable, or corrupt are not collapsed into
+   the lifecycle state enum.
+4. **Capacity is local bounded admission, not scheduling.** Indexing accounts
+   for workload pressure but does not become a global resource scheduler.
+5. **Integrity is logical and provider-neutral.** Indexing validates logical
+   contracts and publication safety; physical storage repair remains
+   provider-owned.
+6. **Recovery is separate from retry.** Recovery classifies failures and
+   selects deterministic actions; provider retry authority remains with Core.
+7. **The active known-good version is protected.** Recovery receives active
+   version lineage as protection context and must return through validation
+   and publication before a replacement can become active.
+8. **Configuration remains Core-owned at the lifecycle level.** Indexing
+   configuration is a validated immutable value and capacity projection;
+   Core remains responsible for configuration snapshots and update lifecycle.
+9. **`IndexEvent` is an Indexing contract, not a transport.** The event is
+   carried through `UniversalRequest` and the result through
+   `UniversalResponse`; no second event bus, transport, or correlation system
+   is introduced.
+10. **Phase 5 engine integration remains deliberately conservative.** The
+    engine facade performs typed event validation, Core lifecycle admission,
+    target validation, capacity admission, and Core capability dispatch. It
+    does not invent a second operation executor or duplicate the Phase 3/4
+    build/query systems.
+11. **Recovery implementation file naming follows the actual module boundary.**
+    The recovery execution implementation is `src/recovery/execution.rs`,
+    avoiding the `recovery::recovery` module-inception structure.
+
+##### Explicit boundary preserved for Phase 6
+
+Phase 5 does not introduce a second health/readiness authority, security
+subsystem, or full observability system. Core remains the owner of universal
+health/readiness/runtime infrastructure, and the remaining hardening and
+observability work belongs to Phase 6.
+
 #### Verification Checklist
 
-- [ ] index lifecycle independent of engine lifecycle
+- [x] index lifecycle independent of engine lifecycle
 
-- [ ] controlled lifecycle transitions
+- [x] controlled lifecycle transitions
 
-- [ ] capacity limits
+- [x] capacity limits
 
-- [ ] capacity accounting
+- [x] capacity accounting
 
-- [ ] bounded query pressure
+- [x] bounded query pressure
 
-- [ ] bounded build pressure
+- [x] bounded build pressure
 
-- [ ] throttling/bounded behavior
+- [x] throttling/bounded behavior
 
-- [ ] integrity validation
+- [x] integrity validation
 
-- [ ] metadata validation
+- [x] metadata validation
 
-- [ ] entry validation
+- [x] entry validation
 
-- [ ] reference validation
+- [x] reference validation
 
-- [ ] version compatibility validation
+- [x] version compatibility validation
 
-- [ ] rebuild output validation
+- [x] rebuild output validation
 
-- [ ] publication precondition validation
+- [x] publication precondition validation
 
-- [ ] distinguishable failure classes
+- [x] distinguishable failure classes
 
-- [ ] deterministic recovery decisions
+- [x] deterministic recovery decisions
 
-- [ ] rebuild-based recovery where incremental repair is insufficient
+- [x] rebuild-based recovery where incremental repair is insufficient
 
-- [ ] protection of the last known-good active version
+- [x] protection of the last known-good active version
 
-- [ ] validated configuration updates
+- [x] validated configuration updates
 
-- [ ] IndexEvent contract implemented on Core UniversalEvent
+- [x] IndexEvent contract implemented on Core UniversalEvent
 
-- [ ] UniversalRequest / UniversalResponse used for IndexEvent request/response communication
+- [x] UniversalRequest / UniversalResponse used for IndexEvent request/response communication
 
-- [ ] source EngineId / EngineInstanceId propagation verified
+- [x] source EngineId / EngineInstanceId propagation verified
 
-- [ ] Core operation/correlation context preserved through IndexEvent processing
+- [x] Core operation/correlation context preserved through IndexEvent processing
 
-- [ ] successful IndexEvent response exposes assigned `IndexId`
+- [x] successful IndexEvent response exposes assigned `IndexId`
 
-- [ ] source-owned semantic payload remains outside Indexing ownership
+- [x] source-owned semantic payload remains outside Indexing ownership
 
-- [ ] no standalone Indexing binary introduced
+- [x] no standalone Indexing binary introduced
 
-- [ ] no secondary event transport or event bus introduced
+- [x] no secondary event transport or event bus introduced
 
-- [ ] appropriate health/readiness reporting
+- [x] appropriate health/readiness reporting
 
-- [ ] no health-owned lifecycle
+- [x] no health-owned lifecycle
 
-- [ ] no retry policy hidden inside failure classification
+- [x] no retry policy hidden inside failure classification
 
-- [ ] Core runtime reused rather than duplicated
+- [x] Core runtime reused rather than duplicated
 
-- [ ] Core retry mechanisms reused rather than duplicated
+- [x] Core retry mechanisms reused rather than duplicated
 
-- [ ] physical storage remaining provider-owned
+- [x] physical storage remaining provider-owned
 
-- [ ] domain semantics remaining source-owned
+- [x] domain semantics remaining source-owned
 
-- [ ] Phase 1–4 regression safety
+- [x] Phase 1–4 regression safety
+
+- [x] bounded pending-capacity waiter registration without an unbounded local queue
+
+- [x] batch-size and per-operation capacity admission checks
+
+- [x] aggregate capacity admission is transactional on rejection
+
+- [x] RAII capacity leases and waiter guards release reservations safely
+
+- [x] index lifecycle terminal-state and idempotent-transition behavior
+
+- [x] configuration validation and lossless projection into capacity limits
+
+- [x] recovery handler dispatch with recovery-handler failure propagation and no automatic retry loop
+
+- [x] IndexEvent protocol-role validation and rejection of invalid/non-indexing event inputs
+
+- [x] provider-neutral rejection of physical-provider instructions at the IndexEvent boundary
+
+- [x] Phase 5 engine boundary integrates Core admission, target validation, event validation, capacity admission, and Core capability dispatch
+
+- [x] Core-backed request/context/identity metadata remains the authoritative source across the Phase 5 event boundary
 
 The fundamental completion condition is:
 
@@ -14112,7 +14220,7 @@ The remaining Phase 6 observability/event-infrastructure work must be interprete
 
 #### Status
 
-**Not Started**
+**In Progress**
 
 ##### Goal
 
