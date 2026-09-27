@@ -72,10 +72,11 @@ use nizaam_indexing::identity::{
 };
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion, IndexVersionId,
-    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryRequest,
-    QueryResult, SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
+    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryResult,
+    SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
     VersionLifecycle,
 };
+use nizaam_indexing::query::QueryRequest;
 use nizaam_indexing::requirement::IndexRequirement;
 use nizaam_indexing::{IndexingEngine, RequestHandlingError};
 

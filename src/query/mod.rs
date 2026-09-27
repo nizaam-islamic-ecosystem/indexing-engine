@@ -111,7 +111,7 @@ mod tests {
                 .expect("exact query request should be valid");
 
         assert_eq!(request.index_id(), &index_id(0x11));
-        assert!(matches!(request.query(), QueryKind::Exact { .. }));
+        assert!(matches!(request.query_kind(), QueryKind::Exact { .. }));
         assert_eq!(request.result_mode(), ResultMode::ReferencesOnly);
     }
 
@@ -123,7 +123,7 @@ mod tests {
         )
         .expect("similarity query request should be valid");
 
-        let requirement = QueryCapabilityRequirement::for_query(request.query())
+        let requirement = QueryCapabilityRequirement::for_query(request.query_kind())
             .expect("similarity query should map to a capability requirement");
 
         assert_eq!(
@@ -197,7 +197,7 @@ mod tests {
         let child_request: request::QueryRequest = root_request;
 
         assert!(matches!(
-            child_request.query(),
+            child_request.query_kind(),
             request::QueryKind::Exact { .. }
         ));
         assert_eq!(

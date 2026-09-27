@@ -13,9 +13,8 @@
 //! - source/domain semantics and domain-object hydration.
 //!
 //! Phase 2 originally exposed `QueryRequest` from `index/query.rs`. Phase 4
-//! promotes this module to the canonical request boundary. The old module can
-//! re-export these types for compatibility without retaining a second request
-//! implementation.
+//! makes this module the canonical request boundary while the old module keeps
+//! the original Phase 2 request API as a thin compatibility adapter.
 
 use core::fmt;
 use core::num::NonZeroUsize;
@@ -425,7 +424,7 @@ pub struct QueryRequest {
     metadata: Option<KeyMaterial>,
 }
 
-/// Owned components returned by [`QueryRequest::into_parts`].
+/// Owned components returned by the canonical Phase 4 request decomposition.
 pub type QueryRequestParts = (
     IndexId,
     Option<IndexNamespace>,
@@ -633,9 +632,9 @@ impl QueryRequest {
         self.family
     }
 
-    /// Returns the logical query kind.
+    /// Returns the canonical Phase 4 logical query kind.
     #[must_use]
-    pub fn query(&self) -> &QueryKind {
+    pub fn query_kind(&self) -> &QueryKind {
         &self.query
     }
 
@@ -964,7 +963,7 @@ mod tests {
             .expect("request should be valid");
 
         assert_eq!(request.index_id(), &index_id(0x11));
-        assert!(matches!(request.query(), QueryKind::Exact { .. }));
+        assert!(matches!(request.query_kind(), QueryKind::Exact { .. }));
         assert!(matches!(request.consistency(), ConsistencyMode::Current));
         assert_eq!(request.result_mode(), ResultMode::ReferencesOnly);
         assert_eq!(request.limit(), None);
@@ -1022,7 +1021,7 @@ mod tests {
             ConsistencyMode::VersionPinned(_)
         ));
         assert_eq!(request.result_mode(), ResultMode::ReferencesWithMetadata);
-        assert!(matches!(request.query(), QueryKind::Text { .. }));
+        assert!(matches!(request.query_kind(), QueryKind::Text { .. }));
     }
 
     #[test]
@@ -1058,16 +1057,22 @@ mod tests {
         let hybrid = QueryRequest::hybrid(index_id(7), vec![first, second])
             .expect("hybrid request should be valid");
 
-        assert!(matches!(exact.query(), QueryKind::Exact { .. }));
-        assert!(matches!(text.query(), QueryKind::Text { .. }));
-        assert!(matches!(structured.query(), QueryKind::Structured { .. }));
+        assert!(matches!(exact.query_kind(), QueryKind::Exact { .. }));
+        assert!(matches!(text.query_kind(), QueryKind::Text { .. }));
         assert!(matches!(
-            neighborhood.query(),
+            structured.query_kind(),
+            QueryKind::Structured { .. }
+        ));
+        assert!(matches!(
+            neighborhood.query_kind(),
             QueryKind::Neighborhood { .. }
         ));
-        assert!(matches!(similarity.query(), QueryKind::Similarity { .. }));
-        assert!(matches!(filtered.query(), QueryKind::Filtered { .. }));
-        assert!(matches!(hybrid.query(), QueryKind::Hybrid { .. }));
+        assert!(matches!(
+            similarity.query_kind(),
+            QueryKind::Similarity { .. }
+        ));
+        assert!(matches!(filtered.query_kind(), QueryKind::Filtered { .. }));
+        assert!(matches!(hybrid.query_kind(), QueryKind::Hybrid { .. }));
     }
 
     #[test]

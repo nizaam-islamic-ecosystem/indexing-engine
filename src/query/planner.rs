@@ -836,6 +836,14 @@ pub enum QueryPlanningError {
         version_id: crate::index::IndexVersionId,
     },
 
+    /// More than one queryable candidate satisfied `Current`. Because the
+    /// planner does not own an active-version registry, it cannot safely infer
+    /// which zero-lag published candidate is the active one.
+    AmbiguousCurrentVersion {
+        index_id: IndexId,
+        candidate_count: usize,
+    },
+
     /// The planner could not construct a capability requirement from the
     /// logical query shape. This is an internal contract error because a
     /// structurally valid `QueryKind` should always map to a non-empty
@@ -902,6 +910,13 @@ impl fmt::Display for QueryPlanningError {
                 formatter,
                 "multiple candidates expose the pinned version {version_id:?} for index {index_id:?}"
             ),
+            Self::AmbiguousCurrentVersion {
+                index_id,
+                candidate_count,
+            } => write!(
+                formatter,
+                "multiple queryable candidates ({candidate_count}) satisfy current consistency for index {index_id:?}; the planner does not own active-version state"
+            ),
             Self::CapabilityRequirement(error) => {
                 write!(formatter, "invalid query capability requirement: {error}")
             }
@@ -960,8 +975,8 @@ where
             .map_err(|error| QueryPlanningError::InvalidCandidate { position, error })?;
     }
 
-    let requirement =
-        QueryCapabilityRequirement::for_query(request.query()).map_err(QueryPlanningError::from)?;
+    let requirement = QueryCapabilityRequirement::for_query(request.query_kind())
+        .map_err(QueryPlanningError::from)?;
 
     let resolution = requirement.resolve(capabilities).ok_or_else(|| {
         QueryPlanningError::MissingProviderCapabilities {
@@ -969,7 +984,7 @@ where
         }
     })?;
 
-    match request.query() {
+    match request.query_kind() {
         QueryKind::Hybrid { components } => {
             plan_hybrid(request, components, &candidates, resolution)
         }
@@ -1217,8 +1232,19 @@ fn select_from_matching_candidates<'a>(
         return Ok(accepted[0].0);
     }
 
-    // Current and StaleAllowed may legitimately have multiple published
-    // candidates. The planner prefers the smallest observed update-sequence
+    if matches!(consistency, ConsistencyMode::Current) {
+        if accepted.len() > 1 {
+            return Err(QueryPlanningError::AmbiguousCurrentVersion {
+                index_id: *accepted[0].0.index_id(),
+                candidate_count: accepted.len(),
+            });
+        }
+
+        return Ok(accepted[0].0);
+    }
+
+    // StaleAllowed may legitimately have multiple published candidates. The
+    // planner prefers the smallest observed update-sequence
     // lag because that is the mandatory freshness dimension in Phase 4. When
     // that value is equal, the opaque version identifier provides only a
     // deterministic tie-break; it is not interpreted as semantic versioning.
@@ -1590,6 +1616,59 @@ mod tests {
                 .update_sequence_lag(),
             Some(0)
         );
+    }
+
+    #[test]
+    fn current_consistency_rejects_ambiguous_zero_lag_candidates_without_active_registry() {
+        let definition = definition("planner.level2", "current-ambiguous", IndexFamily::Inverted);
+        let shared_index_id = index_id(4, &definition);
+
+        let first = IndexCandidate::new(
+            shared_index_id,
+            definition.clone(),
+            published_version("published-v1"),
+            SynchronizationSnapshot::from_sequences(
+                crate::build::UpdateSequence::new(40),
+                crate::build::UpdateSequence::new(40),
+            )
+            .expect("first synchronization should be valid"),
+        );
+
+        let second = IndexCandidate::new(
+            shared_index_id,
+            definition,
+            published_version("published-v2"),
+            SynchronizationSnapshot::from_sequences(
+                crate::build::UpdateSequence::new(40),
+                crate::build::UpdateSequence::new(40),
+            )
+            .expect("second synchronization should be valid"),
+        );
+
+        let request = QueryRequest::with_query(
+            shared_index_id,
+            QueryKind::Text {
+                query: KeyMaterial::text("ambiguous-current"),
+                parameters: None,
+            },
+        )
+        .expect("current query should be valid");
+
+        let error = plan_query(
+            &request,
+            vec![first, second],
+            &available_capabilities(),
+            ProviderAvailability::Available,
+        )
+        .expect_err("Current must not guess between multiple zero-lag published candidates");
+
+        assert!(matches!(
+            error,
+            QueryPlanningError::AmbiguousCurrentVersion {
+                candidate_count: 2,
+                ..
+            }
+        ));
     }
 
     #[test]

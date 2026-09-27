@@ -66,6 +66,7 @@
 
 use core::fmt;
 use core::num::NonZeroUsize;
+use std::collections::BTreeSet;
 
 use nizaam_core::operation::OperationContext;
 
@@ -568,13 +569,23 @@ fn execute_hybrid<P>(
 where
     P: ProviderRetriever,
 {
+    if !hybrid_targets_are_homogeneous(plan) {
+        return Err(RetrievalError::HybridResultUnsupported(
+            RetrievalPlanValidationError::HeterogeneousHybridResultTargets,
+        ));
+    }
+
     let candidates = match plan.capability_resolution() {
         CapabilityResolution::Direct(ProviderCapability::HybridRetrieval) => provider
             .retrieve_hybrid(plan, context)
             .map_err(RetrievalError::Provider)?,
 
         CapabilityResolution::Required(_) => {
+            // Components are merged in request declaration order. This layer
+            // does not rank across components; providers remain responsible
+            // for any relevance ordering they expose within their candidates.
             let mut combined = Vec::new();
+            let mut seen = BTreeSet::new();
 
             for component in plan.components() {
                 let component_capability = component.capability();
@@ -588,7 +599,11 @@ where
                     .retrieve_hybrid_component(component, context)
                     .map_err(RetrievalError::Provider)?;
 
-                combined.extend(candidates);
+                for candidate in candidates {
+                    if seen.insert(candidate.reference().clone()) {
+                        combined.push(candidate);
+                    }
+                }
             }
 
             combined
@@ -602,12 +617,6 @@ where
             ));
         }
     };
-
-    if !hybrid_targets_are_homogeneous(plan) {
-        return Err(RetrievalError::HybridResultUnsupported(
-            RetrievalPlanValidationError::HeterogeneousHybridResultTargets,
-        ));
-    }
 
     build_hybrid_result(plan, candidates).map_err(RetrievalError::ResultConversion)
 }
@@ -763,6 +772,7 @@ mod tests {
         Return(Vec<RankingCandidate>),
         Fail,
         HybridPerComponent,
+        HybridPerComponentWithDuplicates,
         RankSimilarity,
     }
 
@@ -861,7 +871,8 @@ mod tests {
                 ProviderBehavior::Return(candidates) => Ok(candidates.clone()),
                 ProviderBehavior::RankSimilarity => Ok(Vec::new()),
                 ProviderBehavior::Fail => Err(FakeProviderError("exact provider failure")),
-                ProviderBehavior::HybridPerComponent => Ok(Vec::new()),
+                ProviderBehavior::HybridPerComponent
+                | ProviderBehavior::HybridPerComponentWithDuplicates => Ok(Vec::new()),
             }
         }
 
@@ -990,6 +1001,15 @@ mod tests {
                     None,
                     None,
                 )]),
+                ProviderBehavior::HybridPerComponentWithDuplicates => Ok(vec![
+                    Self::candidate("source", "shared", Some(0.9), None),
+                    Self::candidate(
+                        "source",
+                        component.target().version().id().as_str(),
+                        Some(0.5),
+                        None,
+                    ),
+                ]),
                 ProviderBehavior::Fail => {
                     Err(FakeProviderError("hybrid component provider failure"))
                 }
@@ -1636,6 +1656,72 @@ mod tests {
             )
         ));
 
+        assert!(
+            provider.calls().is_empty(),
+            "heterogeneous hybrid targets must be rejected before provider execution"
+        );
+    }
+
+    #[test]
+    fn composed_hybrid_deduplicates_repeated_references_before_applying_limit() {
+        let selected = candidate(
+            15,
+            IndexFamily::Inverted,
+            "retrieval.level2.hybrid.deduplicate",
+            "same-hybrid-v1",
+            17,
+            17,
+        );
+
+        let request = QueryRequest::with_query_options(
+            *selected.index_id(),
+            QueryKind::Hybrid {
+                components: vec![
+                    HybridQueryComponent::new(AtomicQuery::Text {
+                        query: KeyMaterial::text("rust"),
+                        parameters: None,
+                    })
+                    .expect("text component should be valid"),
+                    HybridQueryComponent::new(AtomicQuery::Exact {
+                        key: KeyMaterial::text("book"),
+                    })
+                    .expect("exact component should be valid"),
+                ],
+            },
+            Some(NonZeroUsize::new(2).expect("limit should be non-zero")),
+            ConsistencyMode::current(),
+            ResultMode::ReferencesOnly,
+            None,
+        )
+        .expect("limited hybrid request should be valid");
+
+        let capabilities = capabilities_for(&[
+            ProviderCapability::TextLookup,
+            ProviderCapability::ExactLookup,
+        ]);
+
+        let plan = crate::query::planner::plan_query(
+            &request,
+            vec![selected],
+            &capabilities,
+            ProviderAvailability::Available,
+        )
+        .expect("composed hybrid plan should succeed");
+
+        let provider = FakeProvider::new(
+            capabilities,
+            ProviderBehavior::HybridPerComponentWithDuplicates,
+        );
+
+        let result = execute(&plan, &provider, &operation_context())
+            .expect("deduplicated composed hybrid should succeed");
+
+        assert_eq!(result.hits().len(), 2);
+        assert_eq!(result.hits()[0].reference().object_reference(), "shared");
+        assert_eq!(
+            result.hits()[1].reference().object_reference(),
+            "same-hybrid-v1"
+        );
         assert_eq!(provider.calls(), vec!["hybrid-text", "hybrid-exact"]);
     }
 
@@ -1685,7 +1771,11 @@ mod tests {
             .expect("same-target composed hybrid should produce a legacy QueryResult");
 
         assert_eq!(result.index_version().id().as_str(), "same-hybrid-v1");
-        assert_eq!(result.hits().len(), 2);
+        assert_eq!(result.hits().len(), 1);
+        assert_eq!(
+            result.hits()[0].reference().object_reference(),
+            "same-hybrid-v1"
+        );
         let consistency = result
             .consistency()
             .expect("homogeneous hybrid result should preserve consistency metadata");

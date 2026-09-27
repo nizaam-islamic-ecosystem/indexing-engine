@@ -193,6 +193,7 @@ fn current_policy_accepts_a_published_zero_lag_state() {
             VersionLifecycle::Published,
             Some(12),
             Some(12),
+            selected.source_version(),
             None,
         )
         .expect("zero-lag published state should satisfy Current");
@@ -216,7 +217,14 @@ fn current_policy_requires_an_update_sequence_observation() {
     let selected = version("current-v1", None, None);
 
     let error = ConsistencyMode::Current
-        .evaluate(&selected, VersionLifecycle::Published, None, None, None)
+        .evaluate(
+            &selected,
+            VersionLifecycle::Published,
+            None,
+            None,
+            selected.source_version(),
+            None,
+        )
         .expect_err("Current must not be accepted without sequence observations");
 
     assert_eq!(error, ConsistencyPolicyError::MissingUpdateSequence);
@@ -232,6 +240,7 @@ fn current_policy_rejects_positive_update_sequence_lag() {
             VersionLifecycle::Published,
             Some(15),
             Some(14),
+            selected.source_version(),
             None,
         )
         .expect_err("Current requires zero update-sequence lag");
@@ -252,6 +261,7 @@ fn current_policy_rejects_any_unpublished_version() {
             VersionLifecycle::Building,
             Some(10),
             Some(10),
+            selected.source_version(),
             None,
         )
         .expect_err("unpublished versions must never be queryable");
@@ -271,7 +281,14 @@ fn version_pinned_accepts_the_exact_published_version_without_sequence_observati
     let mode = ConsistencyMode::version_pinned(version_id("pinned-v7"));
 
     let evaluation = mode
-        .evaluate(&selected, VersionLifecycle::Published, None, None, None)
+        .evaluate(
+            &selected,
+            VersionLifecycle::Published,
+            None,
+            None,
+            selected.source_version(),
+            None,
+        )
         .expect("an exact pinned published version does not require freshness observations");
 
     assert_eq!(
@@ -295,6 +312,7 @@ fn version_pinned_rejects_a_different_version_without_fallback() {
             VersionLifecycle::Published,
             Some(9),
             Some(9),
+            selected.source_version(),
             None,
         )
         .expect_err("VersionPinned must require an exact version match");
@@ -314,7 +332,14 @@ fn version_pinned_rejects_an_unpublished_exact_version() {
     let mode = ConsistencyMode::version_pinned(version_id("pinned-v8"));
 
     let error = mode
-        .evaluate(&selected, VersionLifecycle::Ready, None, None, None)
+        .evaluate(
+            &selected,
+            VersionLifecycle::Ready,
+            None,
+            None,
+            selected.source_version(),
+            None,
+        )
         .expect_err("an exact match does not override the publication boundary");
 
     assert_eq!(
@@ -337,6 +362,7 @@ fn stale_allowed_accepts_lag_within_the_declared_sequence_bound() {
             VersionLifecycle::Published,
             Some(10),
             Some(8),
+            selected.source_version(),
             None,
         )
         .expect("lag within the freshness policy should be accepted");
@@ -368,6 +394,7 @@ fn stale_allowed_rejects_lag_outside_the_declared_sequence_bound() {
             VersionLifecycle::Published,
             Some(10),
             Some(7),
+            selected.source_version(),
             None,
         )
         .expect_err("lag above the policy bound must be rejected");
@@ -394,6 +421,7 @@ fn stale_allowed_requires_a_time_observation_when_a_time_bound_is_declared() {
             VersionLifecycle::Published,
             Some(10),
             Some(9),
+            selected.source_version(),
             None,
         )
         .expect_err("a declared time bound requires an observed time lag");
@@ -418,6 +446,7 @@ fn stale_allowed_rejects_excessive_time_lag_even_when_sequence_lag_is_acceptable
             VersionLifecycle::Published,
             Some(10),
             Some(9),
+            selected.source_version(),
             Some(observed),
         )
         .expect_err("every declared freshness constraint must pass");
@@ -446,6 +475,7 @@ fn stale_allowed_requires_and_checks_declared_source_version_compatibility() {
             VersionLifecycle::Published,
             Some(10),
             Some(10),
+            selected_without_source.source_version(),
             None,
         )
         .expect_err("a required source version cannot be satisfied by missing metadata");
@@ -464,6 +494,7 @@ fn stale_allowed_requires_and_checks_declared_source_version_compatibility() {
             VersionLifecycle::Published,
             Some(10),
             Some(10),
+            mismatched.source_version(),
             None,
         )
         .expect_err("a mismatched source version must be rejected");
@@ -492,6 +523,7 @@ fn stale_allowed_combines_sequence_time_and_source_constraints_conjunctively() {
             VersionLifecycle::Published,
             Some(10),
             Some(8),
+            selected.source_version(),
             Some(Duration::from_secs(90)),
         )
         .expect("all declared freshness constraints should pass");
@@ -506,6 +538,7 @@ fn stale_allowed_combines_sequence_time_and_source_constraints_conjunctively() {
             VersionLifecycle::Published,
             Some(10),
             Some(8),
+            selected.source_version(),
             Some(Duration::from_secs(121)),
         )
         .expect_err("one violated freshness dimension must reject the query");

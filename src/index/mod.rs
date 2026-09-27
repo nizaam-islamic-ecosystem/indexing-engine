@@ -308,7 +308,7 @@ mod phase_two_module_tests {
         let result = QueryResult::new(index_id, version, vec![hit])
             .expect("test query result should be valid");
 
-        assert_eq!(request.query_material(), Some(&KeyMaterial::text("term")));
+        assert_eq!(request.query(), &KeyMaterial::text("term"));
         assert_eq!(similarity.metadata(), None);
         assert_eq!(result.hits().len(), 1);
     }

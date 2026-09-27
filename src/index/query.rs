@@ -1,23 +1,161 @@
-//! Backward-compatible query contract exports for the Indexing Engine.
+//! Backward-compatible Phase 2 query contracts for the Indexing Engine.
 //!
-//! Phase 4 promotes the canonical logical query-request and query-result
-//! contracts to [`crate::query`]. This legacy module remains at
-//! `crate::index::query` only as a compatibility boundary for the Phase 2
-//! public API.
+//! Phase 4 moved the canonical logical query request/result contracts to
+//! [`crate::query`]. This legacy module deliberately keeps the original
+//! `QueryRequest` API intact for callers that still use `crate::index::query`
+//! (and the corresponding `crate::index`/crate-root re-exports).
 //!
-//! The query implementations themselves are owned by the canonical Phase 4
-//! modules. This file therefore does not maintain a second implementation.
-//! Existing logical request/result behavior is preserved by re-exporting the
-//! canonical types and retaining the legacy contract test coverage below.
+//! The legacy request is a thin adapter over the canonical Phase 4 request:
+//! there is no second query implementation. The adapter preserves the original
+//! `query()` and `into_parts()` signatures while exposing the canonical request
+//! through `Deref`/conversion for newer code.
 //!
-//! New Phase 4 query kinds, consistency modes, planning contracts, and
-//! retrieval execution contracts belong to [`crate::query`], not this legacy
-//! compatibility module.
+//! New Phase 4 query construction, planning, consistency, and retrieval types
+//! belong to [`crate::query`].
+
+use core::num::NonZeroUsize;
+use core::ops::Deref;
+
+use crate::identity::IndexId;
+use crate::index::KeyMaterial;
+use crate::query::QueryKind;
 
 pub use crate::query::{
-    MetricKind, QueryHit, QueryHitValidationError, QueryRequest, QueryRequestValidationError,
-    QueryResult, QueryResultValidationError,
+    MetricKind, QueryHit, QueryHitValidationError, QueryRequestValidationError, QueryResult,
+    QueryResultValidationError,
 };
+
+/// Backward-compatible wrapper around the canonical Phase 4 [`crate::query::QueryRequest`].
+///
+/// The legacy constructors create only exact requests, which makes the original
+/// `query() -> &KeyMaterial` and four-element `into_parts()` contract
+/// well-defined. Phase 4 callers should construct [`crate::query::QueryRequest`]
+/// directly when they need non-exact query kinds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryRequest {
+    inner: crate::query::QueryRequest,
+}
+
+impl QueryRequest {
+    /// Constructs the original exact logical query request.
+    pub fn new(index_id: IndexId, query: KeyMaterial) -> Result<Self, QueryRequestValidationError> {
+        Ok(Self {
+            inner: crate::query::QueryRequest::new(index_id, query)?,
+        })
+    }
+
+    /// Constructs the original exact logical request with optional limit and metadata.
+    pub fn with_options(
+        index_id: IndexId,
+        query: KeyMaterial,
+        limit: Option<NonZeroUsize>,
+        metadata: Option<KeyMaterial>,
+    ) -> Result<Self, QueryRequestValidationError> {
+        Ok(Self {
+            inner: crate::query::QueryRequest::with_options(index_id, query, limit, metadata)?,
+        })
+    }
+
+    /// Returns the concrete logical index identity.
+    #[must_use]
+    pub fn index_id(&self) -> &IndexId {
+        self.inner.index_id()
+    }
+
+    /// Returns the original generic query material.
+    ///
+    /// Legacy `QueryRequest` values are always exact requests. Use
+    /// `query_kind()` on the canonical request for Phase 4 query variants.
+    #[must_use]
+    pub fn query(&self) -> &KeyMaterial {
+        self.inner
+            .query_material()
+            .expect("legacy QueryRequest must contain exact query material")
+    }
+
+    /// Returns the optional logical result-count requirement.
+    #[must_use]
+    pub fn limit(&self) -> Option<NonZeroUsize> {
+        self.inner.limit()
+    }
+
+    /// Returns caller-supplied generic metadata.
+    #[must_use]
+    pub fn metadata(&self) -> Option<&KeyMaterial> {
+        self.inner.metadata()
+    }
+
+    /// Validates the wrapped canonical request.
+    pub fn validate(&self) -> Result<(), QueryRequestValidationError> {
+        self.inner.validate()
+    }
+
+    /// Borrows the canonical Phase 4 request.
+    #[must_use]
+    pub fn as_canonical(&self) -> &crate::query::QueryRequest {
+        &self.inner
+    }
+
+    /// Converts the legacy request into the canonical Phase 4 request.
+    #[must_use]
+    pub fn into_canonical(self) -> crate::query::QueryRequest {
+        self.inner
+    }
+
+    /// Consumes the request using the original Phase 2 four-element tuple.
+    ///
+    /// This compatibility method intentionally preserves the old public
+    /// signature. The richer Phase 4 request decomposition is available through
+    /// `crate::query::QueryRequest::into_parts()`.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        IndexId,
+        KeyMaterial,
+        Option<NonZeroUsize>,
+        Option<KeyMaterial>,
+    ) {
+        let (
+            index_id,
+            _namespace,
+            _definition_id,
+            _family,
+            query,
+            limit,
+            _consistency,
+            _result_mode,
+            metadata,
+        ) = self.inner.into_parts();
+
+        let query = match query {
+            QueryKind::Exact { key } => key,
+            _ => unreachable!("legacy QueryRequest can only contain an exact query"),
+        };
+
+        (index_id, query, limit, metadata)
+    }
+}
+
+impl Deref for QueryRequest {
+    type Target = crate::query::QueryRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl From<QueryRequest> for crate::query::QueryRequest {
+    fn from(request: QueryRequest) -> Self {
+        request.inner
+    }
+}
+
+impl AsRef<crate::query::QueryRequest> for QueryRequest {
+    fn as_ref(&self) -> &crate::query::QueryRequest {
+        &self.inner
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -46,12 +184,7 @@ mod tests {
             .expect("request should be valid");
 
         assert_eq!(request.index_id().as_bytes(), &[0x11; INDEX_ID_BYTE_LEN]);
-        assert_eq!(
-            request.query(),
-            &crate::query::QueryKind::Exact {
-                key: KeyMaterial::text("bismillah"),
-            }
-        );
+        assert_eq!(request.query(), &KeyMaterial::text("bismillah"));
         assert!(request.limit().is_none());
         assert!(request.metadata().is_none());
     }
@@ -206,38 +339,31 @@ mod tests {
         )
         .expect("request should be valid");
 
-        // Phase 4 extends the request tuple with selector/query-policy fields.
-        // The legacy test intent is preserved by checking the corresponding
-        // canonical fields instead of discarding the richer Phase 4 contract.
-        let (
-            returned_index_id,
-            namespace,
-            definition_id,
-            family,
-            query,
-            limit,
-            consistency,
-            result_mode,
-            metadata,
-        ) = request.into_parts();
+        let (returned_index_id, query, limit, metadata) = request.into_parts();
 
         assert_eq!(returned_index_id.as_bytes(), &[0xaa; INDEX_ID_BYTE_LEN]);
-        assert!(namespace.is_none());
-        assert!(definition_id.is_none());
-        assert!(family.is_none());
-        assert_eq!(
-            query,
-            crate::query::QueryKind::Exact {
-                key: KeyMaterial::text("query"),
-            }
-        );
+        assert_eq!(query, KeyMaterial::text("query"));
         assert_eq!(limit, NonZeroUsize::new(5));
-        assert_eq!(
-            consistency,
-            crate::consistency::policy::ConsistencyMode::Current
-        );
-        assert_eq!(result_mode, crate::query::ResultMode::ReferencesOnly);
         assert_eq!(metadata, Some(KeyMaterial::Bool(true)));
+    }
+
+    #[test]
+    fn legacy_request_can_be_borrowed_or_converted_as_canonical_phase4_request() {
+        let request = QueryRequest::new(index_id(0xbc), KeyMaterial::text("bridge"))
+            .expect("legacy request should be valid");
+
+        assert!(matches!(
+            request.as_canonical().query_kind(),
+            crate::query::QueryKind::Exact {
+                key: KeyMaterial::Text(_)
+            }
+        ));
+
+        let canonical: crate::query::QueryRequest = request.into();
+        assert!(matches!(
+            canonical.query_kind(),
+            crate::query::QueryKind::Exact { .. }
+        ));
     }
 
     #[test]
@@ -248,7 +374,7 @@ mod tests {
         let result = QueryResult::new(index_id(0xbb), version(6), Vec::new())
             .expect("result should be valid");
 
-        let _: crate::query::QueryRequest = request;
+        let _: crate::query::QueryRequest = request.into();
         let _: crate::query::QueryResult = result;
     }
 }

@@ -181,16 +181,22 @@ fn logical_request_constructors_cover_all_phase4_query_kinds() {
     )
     .expect("hybrid request should be valid");
 
-    assert!(matches!(exact.query(), QueryKind::Exact { .. }));
-    assert!(matches!(text.query(), QueryKind::Text { .. }));
-    assert!(matches!(structured.query(), QueryKind::Structured { .. }));
+    assert!(matches!(exact.query_kind(), QueryKind::Exact { .. }));
+    assert!(matches!(text.query_kind(), QueryKind::Text { .. }));
     assert!(matches!(
-        neighborhood.query(),
+        structured.query_kind(),
+        QueryKind::Structured { .. }
+    ));
+    assert!(matches!(
+        neighborhood.query_kind(),
         QueryKind::Neighborhood { .. }
     ));
-    assert!(matches!(similarity.query(), QueryKind::Similarity { .. }));
-    assert!(matches!(filtered.query(), QueryKind::Filtered { .. }));
-    assert!(matches!(hybrid.query(), QueryKind::Hybrid { .. }));
+    assert!(matches!(
+        similarity.query_kind(),
+        QueryKind::Similarity { .. }
+    ));
+    assert!(matches!(filtered.query_kind(), QueryKind::Filtered { .. }));
+    assert!(matches!(hybrid.query_kind(), QueryKind::Hybrid { .. }));
 }
 
 #[test]

@@ -44,9 +44,9 @@ use nizaam_indexing::identity::{
 };
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion, IndexVersionId,
-    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, QueryHit, QueryRequest,
-    QueryResult, SchemaVersion, SimilarityEntry, SourceVersion, TargetReferenceType, Uniqueness,
-    VersionLifecycle,
+    IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, QueryHit,
+    QueryRequest as Phase2QueryRequest, QueryResult, SchemaVersion, SimilarityEntry, SourceVersion,
+    TargetReferenceType, Uniqueness, VersionLifecycle,
 };
 use nizaam_indexing::requirement::IndexRequirement;
 use nizaam_indexing::{IndexingEngine, IndexingRegistration, IndexingRuntime};
@@ -710,7 +710,7 @@ fn phase2_versions_remain_separate_from_one_another_and_from_core_contract_versi
 #[test]
 fn phase2_query_contracts_are_reference_oriented_and_do_not_execute_queries() {
     let index_id = phase2_index_id(0x55);
-    let query = QueryRequest::new(index_id, KeyMaterial::text("lookup"))
+    let query = Phase2QueryRequest::new(index_id, KeyMaterial::text("lookup"))
         .expect("query request should be valid");
 
     let reference = phase2_object_reference("source-q", "object-11");
@@ -993,7 +993,7 @@ use nizaam_indexing::provider::{
 use nizaam_indexing::query::{
     AtomicQuery, CapabilityResolution, ExactRetrievalPlan, FilteredRetrievalPlan,
     HybridQueryComponent, HybridRetrievalPlan, IndexCandidate, NeighborhoodRetrievalPlan,
-    PlannedHybridComponent, ProviderRetriever, QueryKind, ResultMode, RetrievalPlan,
+    PlannedHybridComponent, ProviderRetriever, QueryKind, QueryRequest, ResultMode, RetrievalPlan,
     SimilarityRetrievalPlan, StructuredRetrievalPlan, TextRetrievalPlan, execute, plan_query,
 };
 
@@ -1203,7 +1203,7 @@ fn phase4_query_request_is_usable_without_core_runtime_objects() {
     .expect("logical query request should be valid without Core context");
 
     assert!(request.validate().is_ok());
-    assert!(matches!(request.query(), QueryKind::Exact { .. }));
+    assert!(matches!(request.query_kind(), QueryKind::Exact { .. }));
 }
 
 #[test]

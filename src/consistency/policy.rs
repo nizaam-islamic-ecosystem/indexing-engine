@@ -121,8 +121,15 @@ impl ConsistencyMode {
     ///   time;
     /// - `indexed_update_sequence` is the sequence represented by the selected
     ///   indexed state;
+    /// - `indexed_source_version` is the opaque source version represented by the
+    ///   selected indexed state, when known;
     /// - `time_lag` is a non-negative elapsed source/index lag computed by the
     ///   synchronization layer.
+    ///
+    /// A `Current` evaluation does not invent a source-version comparison from
+    /// this method alone: when both source and indexed source-version
+    /// observations are available, the synchronization boundary rejects a
+    /// mismatch before calling this evaluator.
     ///
     /// The candidate must already be known to the caller as the version it is
     /// considering. This method nevertheless enforces the Phase 3 publication
@@ -133,6 +140,7 @@ impl ConsistencyMode {
         lifecycle: VersionLifecycle,
         source_update_sequence: Option<u64>,
         indexed_update_sequence: Option<u64>,
+        indexed_source_version: Option<&SourceVersion>,
         time_lag: Option<Duration>,
     ) -> Result<ConsistencyEvaluation, ConsistencyPolicyError> {
         if lifecycle != VersionLifecycle::Published {
@@ -158,7 +166,7 @@ impl ConsistencyMode {
                     source_update_sequence,
                     indexed_update_sequence,
                     Some(lag),
-                    version.source_version().cloned(),
+                    indexed_source_version.cloned(),
                     time_lag,
                 ))
             }
@@ -177,7 +185,7 @@ impl ConsistencyMode {
                     source_update_sequence,
                     indexed_update_sequence,
                     update_sequence_lag,
-                    version.source_version().cloned(),
+                    indexed_source_version.cloned(),
                     time_lag,
                 ))
             }
@@ -188,7 +196,7 @@ impl ConsistencyMode {
                     indexed_update_sequence,
                     update_sequence_lag,
                     time_lag,
-                    version.source_version(),
+                    indexed_source_version,
                 )?;
 
                 Ok(ConsistencyEvaluation::new(
@@ -202,7 +210,7 @@ impl ConsistencyMode {
                     source_update_sequence,
                     indexed_update_sequence,
                     update_sequence_lag,
-                    version.source_version().cloned(),
+                    indexed_source_version.cloned(),
                     time_lag,
                 ))
             }
@@ -484,6 +492,12 @@ pub enum ConsistencyPolicyError {
     /// A `Current` query observed a positive source/index sequence lag.
     CurrentStateNotFresh { lag: u64 },
 
+    /// A `Current` query observed conflicting source-version observations.
+    CurrentSourceVersionMismatch {
+        source: SourceVersion,
+        indexed: SourceVersion,
+    },
+
     /// The selected version is not the version explicitly requested by a
     /// `VersionPinned` query.
     PinnedVersionMismatch {
@@ -512,6 +526,10 @@ impl fmt::Display for ConsistencyPolicyError {
             Self::CurrentStateNotFresh { lag } => write!(
                 formatter,
                 "current consistency requires zero update-sequence lag; observed {lag}"
+            ),
+            Self::CurrentSourceVersionMismatch { source, indexed } => write!(
+                formatter,
+                "current consistency requires matching source versions; source is {source:?}, indexed is {indexed:?}"
             ),
             Self::PinnedVersionMismatch { requested, actual } => write!(
                 formatter,
@@ -641,7 +659,14 @@ mod tests {
     fn current_requires_published_version_and_zero_sequence_lag() {
         let candidate = version("v1");
         let not_published = ConsistencyMode::Current
-            .evaluate(&candidate, VersionLifecycle::Ready, Some(5), Some(5), None)
+            .evaluate(
+                &candidate,
+                VersionLifecycle::Ready,
+                Some(5),
+                Some(5),
+                candidate.source_version(),
+                None,
+            )
             .expect_err("a ready candidate must not be queryable");
 
         assert!(matches!(
@@ -658,6 +683,7 @@ mod tests {
                 VersionLifecycle::Published,
                 Some(5),
                 Some(5),
+                candidate.source_version(),
                 None,
             )
             .expect("zero sequence lag should satisfy current consistency");
@@ -673,6 +699,7 @@ mod tests {
             VersionLifecycle::Published,
             Some(7),
             Some(6),
+            version("v1").source_version(),
             None,
         );
 
@@ -683,12 +710,30 @@ mod tests {
     }
 
     #[test]
+    fn current_uses_the_supplied_indexed_source_version_in_result_metadata() {
+        let indexed = source_version("source-indexed");
+        let result = ConsistencyMode::Current
+            .evaluate(
+                &version("v1"),
+                VersionLifecycle::Published,
+                Some(7),
+                Some(7),
+                Some(&indexed),
+                None,
+            )
+            .expect("zero lag with an explicit indexed source version should succeed");
+
+        assert_eq!(result.indexed_source_version(), Some(&indexed));
+    }
+
+    #[test]
     fn current_rejects_missing_sequence_observation() {
         let result = ConsistencyMode::Current.evaluate(
             &version("v1"),
             VersionLifecycle::Published,
             Some(7),
             None,
+            version("v1").source_version(),
             None,
         );
 
@@ -708,6 +753,7 @@ mod tests {
             VersionLifecycle::Published,
             Some(10),
             Some(7),
+            version("v1").source_version(),
             None,
         );
 
@@ -722,6 +768,7 @@ mod tests {
                 VersionLifecycle::Published,
                 Some(10),
                 Some(7),
+                version("v2").source_version(),
                 None,
             )
             .expect("exact pinned version should be accepted even when behind");
@@ -743,6 +790,7 @@ mod tests {
                 VersionLifecycle::Published,
                 Some(9),
                 Some(9),
+                version("v1").source_version(),
                 None,
             )
             .expect("zero lag should satisfy stale-allowed policy");
@@ -760,6 +808,7 @@ mod tests {
                 VersionLifecycle::Published,
                 Some(10),
                 Some(8),
+                version("v1").source_version(),
                 None,
             )
             .expect("lag within the declared bound should be accepted");
@@ -780,6 +829,7 @@ mod tests {
             VersionLifecycle::Published,
             Some(10),
             Some(8),
+            version("v1").source_version(),
             None,
         );
 
@@ -813,6 +863,7 @@ mod tests {
                 VersionLifecycle::Published,
                 Some(20),
                 Some(19),
+                version.source_version(),
                 Some(Duration::from_secs(10)),
             )
             .expect("all combined freshness constraints should pass");
@@ -836,6 +887,7 @@ mod tests {
             VersionLifecycle::Published,
             Some(20),
             Some(19),
+            version("v1").source_version(),
             None,
         );
 
@@ -866,6 +918,7 @@ mod tests {
             VersionLifecycle::Published,
             Some(20),
             Some(19),
+            indexed_version.source_version(),
             None,
         );
 
@@ -886,6 +939,7 @@ mod tests {
             VersionLifecycle::Published,
             Some(4),
             Some(5),
+            version("v1").source_version(),
             None,
         );
 
