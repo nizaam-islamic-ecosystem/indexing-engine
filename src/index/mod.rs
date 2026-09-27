@@ -36,8 +36,10 @@ pub use query::{
 pub use reference::{ObjectReference, ObjectReferenceValidationError};
 pub use similarity::{SimilarityEntry, SimilarityEntryValidationError};
 pub use version::{
-    IndexVersion, IndexVersionId, IndexVersionIdValidationError, IndexVersionValidationError,
-    SchemaVersion, SchemaVersionValidationError, SourceVersion, SourceVersionValidationError,
+    IndexVersion, IndexVersionId, IndexVersionIdValidationError, IndexVersionState,
+    IndexVersionValidationError, SchemaVersion, SchemaVersionValidationError, SourceVersion,
+    SourceVersionValidationError, VersionLifecycle, VersionLifecycleTransitionError,
+    VersionValueValidationError,
 };
 
 use core::fmt;
@@ -262,6 +264,28 @@ mod phase_two_module_tests {
             .expect("test entry should be valid");
 
         assert_eq!(entry.key(), &KeyMaterial::text("term"));
+    }
+
+    #[test]
+    fn phase_three_version_lifecycle_exports_are_connected() {
+        let version =
+            IndexVersion::new(IndexVersionId::new("v2").expect("test version id should be valid"));
+        let mut state = IndexVersionState::new(version);
+
+        assert_eq!(state.lifecycle(), VersionLifecycle::Building);
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("building should transition to validating");
+        state
+            .mark_ready()
+            .expect("validating should transition to ready");
+
+        assert_eq!(state.lifecycle(), VersionLifecycle::Ready);
+        assert!(VersionLifecycle::Ready.can_transition_to(VersionLifecycle::Published));
+        assert!(!VersionLifecycle::Published.can_transition_to(VersionLifecycle::Ready));
+
+        let _transition_error_type: Option<VersionLifecycleTransitionError> = None;
+        let _validation_error_type: Option<VersionValueValidationError> = None;
     }
 
     #[test]

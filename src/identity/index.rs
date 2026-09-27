@@ -87,7 +87,10 @@ impl fmt::Display for IndexIdGenerationError {
                     "invalid key material for IndexId generation: {error}"
                 )
             }
-            Self::UnsupportedVersion { requested, supported } => write!(
+            Self::UnsupportedVersion {
+                requested,
+                supported,
+            } => write!(
                 formatter,
                 "unsupported IndexId generation version {requested}; supported version is {supported}"
             ),
@@ -429,7 +432,12 @@ mod tests {
 
     #[test]
     fn generated_index_id_is_exactly_64_bytes() {
-        let id = generated_id(&namespace(), &definition(), IndexFamily::Inverted, &key_material("lemma"));
+        let id = generated_id(
+            &namespace(),
+            &definition(),
+            IndexFamily::Inverted,
+            &key_material("lemma"),
+        );
 
         assert_eq!(id.as_bytes().len(), 64);
         assert_eq!(IndexId::byte_len(), 64);
@@ -440,13 +448,8 @@ mod tests {
     fn key_material_validation_is_enforced_before_generation() {
         let invalid = KeyMaterial::text("bad\nvalue");
 
-        let error = IndexId::generate(
-            &namespace(),
-            &definition(),
-            IndexFamily::Inverted,
-            &invalid,
-        )
-        .expect_err("invalid key material must be rejected");
+        let error = IndexId::generate(&namespace(), &definition(), IndexFamily::Inverted, &invalid)
+            .expect_err("invalid key material must be rejected");
 
         assert!(matches!(
             error,
@@ -506,7 +509,8 @@ mod tests {
     }
 
     #[test]
-    fn generation_version_participates_in_the_canonical_input_and_unsupported_versions_are_rejected() {
+    fn generation_version_participates_in_the_canonical_input_and_unsupported_versions_are_rejected()
+     {
         let namespace = namespace();
         let definition = definition();
         let key = key_material("lemma");
@@ -536,14 +540,16 @@ mod tests {
             &key,
         )
         .expect("current generation version should succeed");
-        assert!(IndexId::generate_with_version(
-            IndexIdGenerationVersion::new(2),
-            &namespace,
-            &definition,
-            IndexFamily::Inverted,
-            &key,
-        )
-        .is_err());
+        assert!(
+            IndexId::generate_with_version(
+                IndexIdGenerationVersion::new(2),
+                &namespace,
+                &definition,
+                IndexFamily::Inverted,
+                &key,
+            )
+            .is_err()
+        );
 
         assert_ne!(first, IndexId::from_bytes([0_u8; INDEX_ID_BYTE_LEN]));
     }
@@ -567,7 +573,11 @@ mod tests {
             }
         );
         assert!(std::error::Error::source(&error).is_none());
-        assert!(error.to_string().contains("unsupported IndexId generation version"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported IndexId generation version")
+        );
     }
 
     #[test]
@@ -611,13 +621,8 @@ mod tests {
         hasher.update(&canonical);
         hasher.finalize_xof().fill(&mut expected);
 
-        let actual = IndexId::generate(
-            &namespace,
-            &definition,
-            IndexFamily::Inverted,
-            &key,
-        )
-        .expect("generation should succeed");
+        let actual = IndexId::generate(&namespace, &definition, IndexFamily::Inverted, &key)
+            .expect("generation should succeed");
 
         assert_eq!(actual.as_bytes(), &expected);
     }
@@ -628,16 +633,10 @@ mod tests {
         let definition = IndexDefinitionId::new("verse-term").expect("definition must be valid");
         let key = KeyMaterial::text("lemma");
 
-        let actual = IndexId::generate(
-            &namespace,
-            &definition,
-            IndexFamily::Inverted,
-            &key,
-        )
-        .expect("generation should succeed");
+        let actual = IndexId::generate(&namespace, &definition, IndexFamily::Inverted, &key)
+            .expect("generation should succeed");
 
-        const EXPECTED_HEX: &str =
-            "6f26138643aaca2e49a5645e5eae4f5341f96b05d20d8f5901aa2c1457a5f16313c0a57684af0c8329a4693a5785ba814d899e708d72cfcbd36835afa7b3d0c9";
+        const EXPECTED_HEX: &str = "6f26138643aaca2e49a5645e5eae4f5341f96b05d20d8f5901aa2c1457a5f16313c0a57684af0c8329a4693a5785ba814d899e708d72cfcbd36835afa7b3d0c9";
         assert_eq!(hex_encode(actual.as_bytes()), EXPECTED_HEX);
     }
 
