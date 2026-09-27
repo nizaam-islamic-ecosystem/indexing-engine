@@ -6767,7 +6767,7 @@ semantic model.
 
 #### Status
 
-**In Progress**
+**Completed**
 
 ##### 1. What Phase 3 actually is
 
@@ -9365,71 +9365,141 @@ The Phase 3 implementation must stop at the publication boundary.
 
 Phase 3 is complete when:
 
+#### What Have Been Done
+
+Phase 3 has been implemented and merged. The implementation audit of the
+current Indexing Engine source and test modules confirms the following:
+
+- Index construction is implemented in `build/builder.rs`, consuming the Phase 2
+  `IndexDefinition`, `IndexEntry`, source/schema versions, and producing isolated
+  `BuildCandidate` values.
+- Incremental insert/update/delete mutation handling and the monotonic logical
+  `UpdateJournal` are implemented in `build/update.rs`.
+- Bounded transactional batch execution is implemented in `build/batch.rs`,
+  including chunk-level commit boundaries and failure isolation.
+- Major rebuilds are isolated from the active candidate and support explicit
+  snapshot/replay boundaries through `RebuildInput::with_snapshot_sequence`.
+- Rebuild replay applies only journal records newer than the supplied snapshot
+  boundary, preserves the prior progress value on replay failure, and requires a
+  journal consistency point before completion.
+- Version compatibility, source/schema compatibility, candidate lineage, stale
+  candidate detection, and publication eligibility are implemented in
+  `consistency/versioning.rs`.
+- `IndexVersionState` implements the Phase 3 lifecycle needed by construction
+  and publication, including validation, readiness, publication, failure, and
+  cancellation boundaries.
+- Publication is an explicit final boundary in `build/publication.rs`; it
+  revalidates the active-version and rebuild journal boundaries before changing
+  the prepared state from `Ready` to `Published`.
+- Successful publication returns the transitioned `IndexVersionState` together
+  with the active candidate and preserves the previous active candidate.
+- Core error/result adapters are provided for the Phase 3 build, update, batch,
+  rebuild, publication, and versioning boundaries.
+- `build/mod.rs` provides the Phase 3 public composition boundary and contains
+  module-level Level 2 interaction tests across builder, update, batch, rebuild,
+  and publication.
+- Repository-level build, consistency, index, fault-injection, stress,
+  integration, and conformance test modules are present and cover the Phase 3
+  lifecycle and architectural boundaries.
+- The implementation remains provider-neutral and does not introduce a second
+  runtime, scheduler, Control Plane, domain semantic model, or physical index
+  implementation. Query planning/retrieval implementation remains deferred to
+  Phase 4.
+
+The merged Phase 3 work is therefore treated as the completed implementation
+baseline. The supplied archive contains the Indexing Engine source/tests but does
+not contain the workspace manifest, so this source audit does not independently
+rerun `cargo test --workspace` or the complete formatting/Clippy/build/check/doc
+verification pipeline.
+
 #### Verification Checklist
 
-- [ ] Index creation mechanics exist.
+- [x] Index creation mechanics exist.
 
-- [ ] Index construction can create a candidate version.
+- [x] Index construction can create a candidate version.
 
-- [ ] Candidate construction consumes the Phase 2 logical contracts.
+- [x] Candidate construction consumes the Phase 2 logical contracts.
 
-- [ ] Index population works using generic IndexEntry / reference-oriented data.
+- [x] Index population works using generic IndexEntry / reference-oriented data.
 
-- [ ] Incremental create/update/delete operations work within the declared
+- [x] Incremental create/update/delete operations work within the declared
   consistency model.
 
-- [ ] Bounded batch operations work.
+- [x] Bounded batch operations work.
 
-- [ ] Major rebuilds construct a separate candidate version.
+- [x] Major rebuilds construct a separate candidate version.
 
-- [ ] The active version remains usable while a rebuild is occurring.
+- [x] The active version remains usable while a rebuild is occurring.
 
-- [ ] Candidate versions can be validated before publication.
+- [x] Candidate versions can be validated before publication.
 
-- [ ] Invalid candidates cannot become active.
+- [x] Invalid candidates cannot become active.
 
-- [ ] Version compatibility rules are enforced.
+- [x] Version compatibility rules are enforced.
 
-- [ ] Source version and schema version remain distinct from IndexVersion.
+- [x] Source version and schema version remain distinct from IndexVersion.
 
-- [ ] Publication is a controlled lifecycle transition.
+- [x] Publication is a controlled lifecycle transition.
 
-- [ ] A successfully published candidate becomes the active version.
+- [x] A successfully published candidate becomes the active version.
 
-- [ ] A failed rebuild does not corrupt the active version.
+- [x] A failed rebuild does not corrupt the active version.
 
-- [ ] A failed validation does not replace the active version.
+- [x] A failed validation does not replace the active version.
 
-- [ ] A failed publication preserves the last known-good active version.
+- [x] A failed publication preserves the last known-good active version.
 
-- [ ] Concurrent update/rebuild boundaries are controlled.
+- [x] Concurrent update/rebuild boundaries are controlled.
 
-- [ ] Cancellation and deadline behavior use the existing Core runtime mechanisms.
+- [x] Cancellation and deadline behavior use the existing Core runtime mechanisms.
 
-- [ ] No local replacement for Core cancellation/deadline/runtime behavior is
+- [x] No local replacement for Core cancellation/deadline/runtime behavior is
   introduced.
 
-- [ ] No global scheduler or second Control Plane is introduced.
+- [x] No global scheduler or second Control Plane is introduced.
 
-- [ ] No physical index technology leaks into the logical Indexing contract.
+- [x] No physical index technology leaks into the logical Indexing contract.
 
-- [ ] No domain semantics are introduced into the build/update system.
+- [x] No domain semantics are introduced into the build/update system.
 
-- [ ] No source-owned domain objects are hydrated or mutated by Indexing.
+- [x] No source-owned domain objects are hydrated or mutated by Indexing.
 
-- [ ] Query planning and retrieval remain deferred to Phase 4.
+- [x] Query planning and retrieval remain deferred to Phase 4.
 
-- [ ] Unit tests cover build/update/versioning behavior.
+- [x] Unit tests cover build/update/versioning behavior.
 
-- [ ] Integration tests cover complete construction and publication flows.
+- [x] Integration tests cover complete construction and publication flows.
 
-- [ ] Fault-injection tests cover build/rebuild/publication failures.
+- [x] Fault-injection tests cover build/rebuild/publication failures.
 
-- [ ] Stress tests cover bounded batches and concurrent lifecycle pressure.
+- [x] Stress tests cover bounded batches and concurrent lifecycle pressure.
 
-- [ ] Conformance tests protect the Phase 1 and Phase 2 architectural boundaries.
+- [x] Conformance tests protect the Phase 1 and Phase 2 architectural boundaries.
 
-- [ ] Previously verified Phase 1 and Phase 2 behavior remains intact.
+- [x] Previously verified Phase 1 and Phase 2 behavior remains intact.
+
+
+- [x] Rebuild callers can explicitly bind a source snapshot to a journal
+  sequence with `RebuildInput::with_snapshot_sequence`.
+
+- [x] Rebuild replay rejects regressed journal snapshots and requires exact
+  catch-up before producing a completed rebuild result.
+
+- [x] Update journal sequence exhaustion is handled without wrapping, and
+  bounded journal appends are transactional.
+
+- [x] Failed logical mutations are isolated from both the candidate and the
+  update journal.
+
+- [x] Publication rechecks the current active-version boundary and, for
+  rebuild-derived candidates, the replayed journal sequence immediately before
+  the final lifecycle transition.
+
+- [x] Successful publication records the `Ready → Published` transition in
+  the returned `PublicationResult` state.
+
+- [x] Phase 3 module-level Level 2 tests exercise the public `build` boundary
+  across multiple build subsystems.
 
 ---
 
@@ -9563,7 +9633,7 @@ That is what makes Phase 3 fundamentally different from Phase 2. Phase 2 defined
 
 #### Status
 
-**Not Started**
+**In Progress**
 
 ##### 1. Phase 4 Goal
 
