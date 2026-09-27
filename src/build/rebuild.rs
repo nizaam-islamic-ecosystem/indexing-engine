@@ -170,6 +170,7 @@ impl RebuildInput {
         IndexDefinition,
         IndexVersionId,
         BuildSnapshot,
+        UpdateSequence,
         Option<IndexVersionId>,
         Option<IndexVersionId>,
     ) {
@@ -178,6 +179,7 @@ impl RebuildInput {
             self.definition,
             self.candidate_version_id,
             self.snapshot,
+            self.snapshot_sequence,
             self.base_version,
             self.active_version,
         )
