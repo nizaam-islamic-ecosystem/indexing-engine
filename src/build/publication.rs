@@ -60,7 +60,7 @@ pub struct PublicationCandidate {
     candidate: BuildCandidate,
     base_version: Option<IndexVersionId>,
     validated_against_active: Option<IndexVersionId>,
-    validated_lifecycle: VersionLifecycle,
+    state: IndexVersionState,
     replayed_through: Option<UpdateSequence>,
 }
 
@@ -83,10 +83,16 @@ impl PublicationCandidate {
         self.validated_against_active.as_ref()
     }
 
+    /// Returns the full lifecycle state that was validated before preparation.
+    #[must_use]
+    pub fn state(&self) -> &IndexVersionState {
+        &self.state
+    }
+
     /// Returns the lifecycle state that was validated before preparation.
     #[must_use]
     pub const fn validated_lifecycle(&self) -> VersionLifecycle {
-        self.validated_lifecycle
+        self.state.lifecycle()
     }
 
     /// Returns the rebuild journal sequence that was replayed before preparation,
@@ -104,11 +110,13 @@ impl PublicationCandidate {
         BuildCandidate,
         Option<IndexVersionId>,
         Option<IndexVersionId>,
+        IndexVersionState,
     ) {
         (
             self.candidate,
             self.base_version,
             self.validated_against_active,
+            self.state,
         )
     }
 
@@ -116,14 +124,14 @@ impl PublicationCandidate {
         candidate: BuildCandidate,
         base_version: Option<IndexVersionId>,
         validated_against_active: Option<IndexVersionId>,
-        validated_lifecycle: VersionLifecycle,
+        state: IndexVersionState,
         replayed_through: Option<UpdateSequence>,
     ) -> Self {
         Self {
             candidate,
             base_version,
             validated_against_active,
-            validated_lifecycle,
+            state,
             replayed_through,
         }
     }
@@ -138,6 +146,7 @@ impl PublicationCandidate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicationResult {
     active: BuildCandidate,
+    state: IndexVersionState,
     previous_active: Option<BuildCandidate>,
 }
 
@@ -148,16 +157,24 @@ impl PublicationResult {
         &self.active
     }
 
+    /// Returns the lifecycle state produced by the successful publication
+    /// transition.
+    #[must_use]
+    pub fn state(&self) -> &IndexVersionState {
+        &self.state
+    }
+
     /// Returns the previously active candidate, when one existed.
     #[must_use]
     pub fn previous_active(&self) -> Option<&BuildCandidate> {
         self.previous_active.as_ref()
     }
 
-    /// Consumes the publication result and returns `(active, previous_active)`.
+    /// Consumes the publication result and returns
+    /// `(active, state, previous_active)`.
     #[must_use]
-    pub fn into_parts(self) -> (BuildCandidate, Option<BuildCandidate>) {
-        (self.active, self.previous_active)
+    pub fn into_parts(self) -> (BuildCandidate, IndexVersionState, Option<BuildCandidate>) {
+        (self.active, self.state, self.previous_active)
     }
 }
 
@@ -487,7 +504,7 @@ impl IndexPublisher {
             candidate,
             base_version,
             active_version,
-            candidate_state.lifecycle(),
+            candidate_state,
             replayed_through,
         ))
     }
@@ -564,9 +581,15 @@ impl IndexPublisher {
             }
         }
 
-        let (active, _base_version, _validated_against_active) = prepared.into_parts();
+        let (active, _base_version, _validated_against_active, mut state) = prepared.into_parts();
+
+        state
+            .mark_published()
+            .expect("prepared state is Ready, and Ready → Published is valid");
+
         Ok(PublicationResult {
             active,
+            state,
             previous_active: current_active,
         })
     }
@@ -797,6 +820,7 @@ mod tests {
             .expect("publication should succeed");
 
         assert_eq!(result.active(), &next);
+        assert_eq!(result.state().lifecycle(), VersionLifecycle::Published);
         assert_eq!(result.previous_active(), Some(&previous));
     }
 

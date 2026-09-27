@@ -86,6 +86,11 @@ pub struct RebuildInput {
 impl RebuildInput {
     /// Creates a rebuild input from a logical index, definition, candidate
     /// version identity, captured source snapshot, and observed lineage.
+    ///
+    /// The replay boundary defaults to [`UpdateSequence::INITIAL`]. When the
+    /// supplied snapshot already reflects journal records, callers must use
+    /// [`Self::with_snapshot_sequence`] to provide the sequence captured at the
+    /// same observation boundary as that snapshot.
     #[must_use]
     pub fn new(
         index_id: IndexId,
@@ -207,7 +212,12 @@ impl RebuildProgress {
         self.base_version.as_ref()
     }
 
-    /// Returns the journal sequence captured when rebuild construction began.
+    /// Returns the replay boundary supplied through
+    /// [`RebuildInput::with_snapshot_sequence`] when rebuild construction began.
+    ///
+    /// This defaults to [`UpdateSequence::INITIAL`] when the input does not
+    /// specify a snapshot sequence; it is not inferred from the journal's
+    /// current sequence.
     #[must_use]
     pub const fn captured_sequence(&self) -> UpdateSequence {
         self.captured_sequence
@@ -285,7 +295,12 @@ impl RebuildResult {
         self.base_version.as_ref()
     }
 
-    /// Returns the journal sequence captured at rebuild start.
+    /// Returns the replay boundary supplied through
+    /// [`RebuildInput::with_snapshot_sequence`] at rebuild start.
+    ///
+    /// This defaults to [`UpdateSequence::INITIAL`] when the input does not
+    /// specify a snapshot sequence; it is not inferred from the journal's
+    /// current sequence.
     #[must_use]
     pub const fn captured_sequence(&self) -> UpdateSequence {
         self.captured_sequence
@@ -550,8 +565,9 @@ impl IndexRebuilder {
     /// Starts an isolated rebuild.
     ///
     /// The supplied [`BuildSnapshot`] is the source state used for candidate
-    /// construction. After the snapshot is supplied, the current journal
-    /// sequence is captured as the replay boundary `N`.
+    /// construction. The replay boundary `N` is the sequence supplied through
+    /// [`RebuildInput::with_snapshot_sequence`], defaulting to
+    /// [`UpdateSequence::INITIAL`].
     ///
     /// No update records at or below `N` are replayed because they are treated
     /// as part of the captured build boundary. Records strictly greater than
