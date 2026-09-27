@@ -121,15 +121,15 @@ impl ConsistencyMode {
     ///   time;
     /// - `indexed_update_sequence` is the sequence represented by the selected
     ///   indexed state;
-    /// - `indexed_source_version` is the opaque source version represented by the
-    ///   selected indexed state, when known;
     /// - `time_lag` is a non-negative elapsed source/index lag computed by the
-    ///   synchronization layer.
+    ///   synchronization layer;
+    /// - `indexed_source_version` is the opaque source version represented by the
+    ///   selected indexed state, when known.
     ///
-    /// A `Current` evaluation does not invent a source-version comparison from
-    /// this method alone: when both source and indexed source-version
-    /// observations are available, the synchronization boundary rejects a
-    /// mismatch before calling this evaluator.
+    /// Update-sequence lag is derived from the source and indexed sequence
+    /// observations by the selected consistency mode. `StaleAllowed` delegates
+    /// that derivation to [`FreshnessPolicy::evaluate`] so sequence-ahead states
+    /// are rejected by the freshness policy itself.
     ///
     /// The candidate must already be known to the caller as the version it is
     /// considering. This method nevertheless enforces the Phase 3 publication
@@ -150,11 +150,10 @@ impl ConsistencyMode {
             });
         }
 
-        let update_sequence_lag =
-            calculate_update_sequence_lag(source_update_sequence, indexed_update_sequence)?;
-
         match self {
             Self::Current => {
+                let update_sequence_lag =
+                    calculate_update_sequence_lag(source_update_sequence, indexed_update_sequence)?;
                 let lag = require_update_sequence_lag(update_sequence_lag)?;
                 if lag != 0 {
                     return Err(ConsistencyPolicyError::CurrentStateNotFresh { lag });
@@ -179,6 +178,9 @@ impl ConsistencyMode {
                     });
                 }
 
+                let update_sequence_lag =
+                    calculate_update_sequence_lag(source_update_sequence, indexed_update_sequence)?;
+
                 Ok(ConsistencyEvaluation::new(
                     self.clone(),
                     ConsistencyEvaluationState::VersionPinned,
@@ -194,10 +196,14 @@ impl ConsistencyMode {
                 let assessment = policy.evaluate(
                     source_update_sequence,
                     indexed_update_sequence,
-                    update_sequence_lag,
                     time_lag,
                     indexed_source_version,
                 )?;
+
+                let update_sequence_lag = match (source_update_sequence, indexed_update_sequence) {
+                    (Some(source), Some(indexed)) => Some(source - indexed),
+                    _ => None,
+                };
 
                 Ok(ConsistencyEvaluation::new(
                     self.clone(),
@@ -287,16 +293,14 @@ impl FreshnessPolicy {
         &self,
         source_update_sequence: Option<u64>,
         indexed_update_sequence: Option<u64>,
-        update_sequence_lag: Option<u64>,
         time_lag: Option<Duration>,
         indexed_source_version: Option<&SourceVersion>,
     ) -> Result<FreshnessEvaluation, FreshnessPolicyError> {
-        let lag = match (
-            source_update_sequence,
-            indexed_update_sequence,
-            update_sequence_lag,
-        ) {
-            (Some(_), Some(_), Some(lag)) => lag,
+        let lag = match (source_update_sequence, indexed_update_sequence) {
+            (Some(source), Some(indexed)) if indexed > source => {
+                return Err(FreshnessPolicyError::IndexedSequenceAhead { source, indexed });
+            }
+            (Some(source), Some(indexed)) => source - indexed,
             _ => return Err(FreshnessPolicyError::MissingUpdateSequence),
         };
 
@@ -781,6 +785,41 @@ mod tests {
     }
 
     #[test]
+    fn freshness_policy_derives_sequence_lag_from_source_and_indexed_sequences() {
+        let policy = FreshnessPolicy::new(2);
+
+        let result = policy
+            .evaluate(Some(10), Some(8), None, None)
+            .expect("two concrete sequence observations should be sufficient");
+
+        assert_eq!(result, FreshnessEvaluation::StaleAccepted);
+    }
+
+    #[test]
+    fn freshness_policy_rejects_indexed_sequence_ahead_of_source() {
+        let policy = FreshnessPolicy::new(2);
+
+        let result = policy.evaluate(Some(4), Some(5), None, None);
+
+        assert_eq!(
+            result,
+            Err(FreshnessPolicyError::IndexedSequenceAhead {
+                source: 4,
+                indexed: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn freshness_policy_requires_both_sequence_observations() {
+        let policy = FreshnessPolicy::new(2);
+
+        let result = policy.evaluate(Some(4), None, None, None);
+
+        assert_eq!(result, Err(FreshnessPolicyError::MissingUpdateSequence));
+    }
+
+    #[test]
     fn stale_allowed_accepts_zero_lag_as_fresh() {
         let mode = ConsistencyMode::StaleAllowed(FreshnessPolicy::new(3));
 
@@ -945,10 +984,12 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(ConsistencyPolicyError::IndexedSequenceAhead {
-                source: 4,
-                indexed: 5
-            })
+            Err(ConsistencyPolicyError::Freshness(
+                FreshnessPolicyError::IndexedSequenceAhead {
+                    source: 4,
+                    indexed: 5
+                }
+            ))
         ));
     }
 
