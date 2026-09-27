@@ -368,7 +368,7 @@ fn stale_allowed_accepts_lag_within_the_declared_sequence_bound() {
         .expect("lag within the freshness policy should be accepted");
 
     let freshness = FreshnessPolicy::new(2)
-        .evaluate(Some(10), Some(8), Some(2), None, selected.source_version())
+        .evaluate(Some(10), Some(8), None, selected.source_version())
         .expect("the lower-level freshness policy should accept the same observation");
     assert_eq!(freshness, FreshnessEvaluation::StaleAccepted);
 
