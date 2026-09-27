@@ -66,7 +66,7 @@
 
 use core::fmt;
 use core::num::NonZeroUsize;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use nizaam_core::operation::OperationContext;
 
@@ -75,6 +75,7 @@ use super::planner::{
     NeighborhoodRetrievalPlan, PlannedHybridComponent, RetrievalPlan, SimilarityRetrievalPlan,
     StructuredRetrievalPlan, TextRetrievalPlan,
 };
+use super::request::ResultMode;
 use super::result::{
     ConsistencyMetadata, ConsistencyMetadataValidationError, ConsistencyState, QueryHit,
     QueryHitValidationError, QueryResult, QueryResultValidationError,
@@ -417,6 +418,7 @@ where
                 plan.context().target().index_id(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
+                plan.context().result_mode(),
                 plan.context().limit(),
                 candidates,
             )
@@ -432,6 +434,7 @@ where
                 plan.context().target().index_id(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
+                plan.context().result_mode(),
                 plan.context().limit(),
                 candidates,
             )
@@ -447,6 +450,7 @@ where
                 plan.context().target().index_id(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
+                plan.context().result_mode(),
                 plan.context().limit(),
                 candidates,
             )
@@ -462,6 +466,7 @@ where
                 plan.context().target().index_id(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
+                plan.context().result_mode(),
                 plan.context().limit(),
                 candidates,
             )
@@ -477,6 +482,7 @@ where
                 plan.context().target().index_id(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
+                plan.context().result_mode(),
                 plan.context().limit(),
                 candidates,
             )
@@ -492,6 +498,7 @@ where
                 plan.context().target().index_id(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
+                plan.context().result_mode(),
                 plan.context().limit(),
                 candidates,
             )
@@ -581,11 +588,12 @@ where
             .map_err(RetrievalError::Provider)?,
 
         CapabilityResolution::Required(_) => {
-            // Components are merged in request declaration order. This layer
-            // does not rank across components; providers remain responsible
-            // for any relevance ordering they expose within their candidates.
+            // Components are merged in request declaration order. Cross-component
+            // ranking is not performed here; provider-side ranking remains the
+            // provider's responsibility. Duplicate references are normalized after
+            // candidate conversion so optional hit data can be retained before
+            // the final logical result limit is applied.
             let mut combined = Vec::new();
-            let mut seen = BTreeSet::new();
 
             for component in plan.components() {
                 let component_capability = component.capability();
@@ -599,11 +607,7 @@ where
                     .retrieve_hybrid_component(component, context)
                     .map_err(RetrievalError::Provider)?;
 
-                for candidate in candidates {
-                    if seen.insert(candidate.reference().clone()) {
-                        combined.push(candidate);
-                    }
-                }
+                combined.extend(candidates);
             }
 
             combined
@@ -625,10 +629,11 @@ fn build_single_result(
     index_id: &IndexId,
     version: &IndexVersion,
     consistency: &ConsistencyEvaluation,
+    result_mode: ResultMode,
     limit: Option<NonZeroUsize>,
     candidates: Vec<RankingCandidate>,
 ) -> Result<QueryResult, RetrievalResultError> {
-    let mut hits = convert_candidates(candidates)?;
+    let mut hits = convert_candidates(candidates, result_mode)?;
 
     apply_limit(&mut hits, limit);
 
@@ -661,7 +666,8 @@ fn build_hybrid_result(
 
     let first_target = first.target();
 
-    let mut hits = convert_candidates(candidates)?;
+    let mut hits = convert_candidates(candidates, plan.result_mode())?;
+    deduplicate_hybrid_hits(&mut hits);
     apply_limit(&mut hits, plan.limit());
 
     let consistency = consistency_metadata(first_target.consistency())?;
@@ -675,8 +681,65 @@ fn build_hybrid_result(
     .map_err(RetrievalResultError::InvalidResult)
 }
 
+/// Deduplicates hybrid results by source-owned object reference before the
+/// logical result limit is applied.
+///
+/// Component order remains the first-occurrence order. When the same reference
+/// is returned by multiple components, later candidates only fill optional
+/// fields that the first candidate did not provide. The retrieval layer does
+/// not compare or interpret score/distance values because their direction and
+/// semantics remain provider-owned.
+fn deduplicate_hybrid_hits(hits: &mut Vec<QueryHit>) {
+    let mut positions = BTreeMap::new();
+    let mut deduplicated = Vec::with_capacity(hits.len());
+
+    for hit in hits.drain(..) {
+        let reference = hit.reference().clone();
+
+        if let Some(&position) = positions.get(&reference) {
+            merge_hybrid_hit(&mut deduplicated[position], hit);
+        } else {
+            let position = deduplicated.len();
+            positions.insert(reference, position);
+            deduplicated.push(hit);
+        }
+    }
+
+    *hits = deduplicated;
+}
+
+/// Preserves first-occurrence ordering while carrying forward optional
+/// information that was absent from the first candidate.
+///
+/// If both candidates provide the same optional metric/metadata field, the
+/// first occurrence is retained because this layer has no provider-declared
+/// rule for deciding which value is semantically preferable.
+fn merge_hybrid_hit(existing: &mut QueryHit, incoming: QueryHit) {
+    let (reference, score, distance, metadata) = existing.clone().into_parts();
+    let (_, incoming_score, incoming_distance, incoming_metadata) = incoming.into_parts();
+
+    let score = score.or(incoming_score);
+    let distance = distance.or(incoming_distance);
+    let metadata = metadata.or(incoming_metadata);
+
+    let merged = QueryHit::new(reference)
+        .with_metrics(score, distance)
+        .expect("validated hybrid hits must contain finite metrics");
+
+    let merged = if let Some(metadata) = metadata {
+        merged
+            .with_metadata(metadata)
+            .expect("validated hybrid hit metadata must remain valid")
+    } else {
+        merged
+    };
+
+    *existing = merged;
+}
+
 fn convert_candidates(
     candidates: Vec<RankingCandidate>,
+    result_mode: ResultMode,
 ) -> Result<Vec<QueryHit>, RetrievalResultError> {
     let mut hits = Vec::with_capacity(candidates.len());
 
@@ -686,6 +749,11 @@ fn convert_candidates(
             .map_err(|error| RetrievalResultError::InvalidCandidate { position, error })?;
 
         let (reference, score, distance, _ordering_key, metadata) = candidate.into_parts();
+
+        let (score, distance, metadata) = match result_mode {
+            ResultMode::ReferencesOnly => (None, None, None),
+            ResultMode::ReferencesWithMetadata => (score, distance, metadata),
+        };
 
         let hit = QueryHit::new(reference)
             .with_metrics(score, distance)
@@ -1132,9 +1200,18 @@ mod tests {
             20,
         );
 
-        let request =
-            QueryRequest::similarity(*selected.index_id(), KeyMaterial::bytes(vec![1, 2, 3]))
-                .expect("similarity request should be valid");
+        let request = QueryRequest::with_query_options(
+            *selected.index_id(),
+            QueryKind::Similarity {
+                representation: KeyMaterial::bytes(vec![1, 2, 3]),
+                parameters: None,
+            },
+            None,
+            ConsistencyMode::current(),
+            ResultMode::ReferencesWithMetadata,
+            None,
+        )
+        .expect("similarity request should be valid");
 
         let capabilities = capabilities_for(&[
             ProviderCapability::SimilarityLookup,
@@ -1363,6 +1440,8 @@ mod tests {
         assert_eq!(result.hits().len(), 2);
         assert_eq!(result.hits()[0].reference().object_reference(), "one");
         assert_eq!(result.hits()[1].reference().object_reference(), "two");
+        assert_eq!(result.hits()[0].score(), Some(1.0));
+        assert_eq!(result.hits()[1].score(), Some(0.9));
     }
 
     #[test]
@@ -1496,14 +1575,20 @@ mod tests {
             12,
         );
 
-        let request = QueryRequest::filtered(
+        let request = QueryRequest::with_query_options(
             *selected.index_id(),
-            AtomicQuery::Text {
-                query: KeyMaterial::text("rust"),
-                parameters: None,
+            QueryKind::Filtered {
+                base: AtomicQuery::Text {
+                    query: KeyMaterial::text("rust"),
+                    parameters: None,
+                },
+                filter: KeyMaterial::map([("language", KeyMaterial::text("en"))])
+                    .expect("filter material should be valid"),
             },
-            KeyMaterial::map([("language", KeyMaterial::text("en"))])
-                .expect("filter material should be valid"),
+            None,
+            ConsistencyMode::current(),
+            ResultMode::ReferencesWithMetadata,
+            None,
         )
         .expect("filtered request should be valid");
 
@@ -1722,6 +1807,12 @@ mod tests {
             result.hits()[1].reference().object_reference(),
             "same-hybrid-v1"
         );
+        assert!(result.hits()[0].score().is_none());
+        assert!(result.hits()[0].distance().is_none());
+        assert!(result.hits()[0].metadata().is_none());
+        assert!(result.hits()[1].score().is_none());
+        assert!(result.hits()[1].distance().is_none());
+        assert!(result.hits()[1].metadata().is_none());
         assert_eq!(provider.calls(), vec!["hybrid-text", "hybrid-exact"]);
     }
 
