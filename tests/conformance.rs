@@ -724,7 +724,7 @@ fn phase2_query_contracts_are_reference_oriented_and_do_not_execute_queries() {
     )
     .expect("query result should be valid");
 
-    assert_eq!(query.query(), &KeyMaterial::text("lookup"));
+    assert_eq!(query.query_material(), Some(&KeyMaterial::text("lookup")));
     assert_eq!(result.hits().len(), 1);
     assert_eq!(result.hits()[0].reference(), &reference);
     assert_eq!(result.hits()[0].score(), Some(0.91));
@@ -977,4 +977,499 @@ fn phase3_batch_boundary_is_transactional_and_remains_provider_neutral() {
     }
 
     assert_eq!(base.len(), 1);
+}
+
+// -----------------------------------------------------------------------------
+// Phase 4 architectural conformance coverage
+// -----------------------------------------------------------------------------
+
+use std::fmt::{Display, Formatter};
+use std::sync::{Arc, Mutex};
+
+use nizaam_indexing::consistency::{ConsistencyMode, FreshnessPolicy, SynchronizationSnapshot};
+use nizaam_indexing::provider::{
+    ProviderAvailability, ProviderCapabilities, ProviderCapability, RankingCandidate,
+};
+use nizaam_indexing::query::{
+    AtomicQuery, CapabilityResolution, ExactRetrievalPlan, FilteredRetrievalPlan,
+    HybridQueryComponent, HybridRetrievalPlan, IndexCandidate, NeighborhoodRetrievalPlan,
+    PlannedHybridComponent, ProviderRetriever, QueryKind, ResultMode, RetrievalPlan,
+    SimilarityRetrievalPlan, StructuredRetrievalPlan, TextRetrievalPlan, execute, plan_query,
+};
+
+fn phase4_conformance_candidate(
+    seed: u8,
+    definition_value: &str,
+    version_value: &str,
+    source_sequence: u64,
+    indexed_sequence: u64,
+    lifecycle: VersionLifecycle,
+) -> IndexCandidate {
+    let definition = IndexDefinition::new(
+        IndexDefinitionIdentity::new(
+            phase2_definition_id(definition_value),
+            phase2_namespace("phase4.conformance"),
+            IndexFamily::Identity,
+        ),
+        phase2_key_definition(),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        Some(SourceVersion::new("source-v1").expect("source version should be valid")),
+        Some(SchemaVersion::new("schema-v1").expect("schema version should be valid")),
+    )
+    .expect("phase4 conformance definition should be valid");
+
+    let version = IndexVersion::with_metadata(
+        IndexVersionId::new(version_value).expect("version ID should be valid"),
+        Some(SourceVersion::new("source-v1").expect("source version should be valid")),
+        Some(SchemaVersion::new("schema-v1").expect("schema version should be valid")),
+        None,
+    )
+    .expect("phase4 version should be valid");
+    let mut state = IndexVersionState::new(version);
+    if lifecycle != VersionLifecycle::Building {
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("version should enter validation");
+        state.mark_ready().expect("version should become ready");
+    }
+    if lifecycle == VersionLifecycle::Published {
+        state
+            .mark_published()
+            .expect("version should become published");
+    }
+
+    let synchronization = SynchronizationSnapshot::from_sequences(
+        UpdateSequence::new(source_sequence),
+        UpdateSequence::new(indexed_sequence),
+    )
+    .expect("synchronization should be valid");
+
+    IndexCandidate::new(
+        IndexId::from_bytes([seed; 64]),
+        definition,
+        state,
+        synchronization,
+    )
+}
+
+#[derive(Clone, Debug)]
+struct ConformanceProvider {
+    capabilities: ProviderCapabilities,
+    context_addresses: Arc<Mutex<Vec<usize>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConformanceProviderError;
+
+impl Display for ConformanceProviderError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("conformance provider failure")
+    }
+}
+
+impl std::error::Error for ConformanceProviderError {}
+
+impl ConformanceProvider {
+    fn new(capabilities: ProviderCapabilities) -> Self {
+        Self {
+            capabilities,
+            context_addresses: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn record_context(&self, context: &OperationContext) {
+        self.context_addresses
+            .lock()
+            .expect("context mutex should not be poisoned")
+            .push(context as *const OperationContext as usize);
+    }
+
+    fn saw_context(&self, context: &OperationContext) -> bool {
+        self.context_addresses
+            .lock()
+            .expect("context mutex should not be poisoned")
+            .contains(&(context as *const OperationContext as usize))
+    }
+
+    fn one_reference() -> Vec<RankingCandidate> {
+        vec![RankingCandidate::new(
+            ObjectReference::new("source", "opaque-object")
+                .expect("test reference should be valid"),
+        )]
+    }
+}
+
+impl ProviderRetriever for ConformanceProvider {
+    type Error = ConformanceProviderError;
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        ProviderAvailability::Available
+    }
+
+    fn retrieve_exact(
+        &self,
+        _plan: &ExactRetrievalPlan,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+
+    fn retrieve_text(
+        &self,
+        _plan: &TextRetrievalPlan,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+
+    fn retrieve_structured(
+        &self,
+        _plan: &StructuredRetrievalPlan,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+
+    fn retrieve_neighborhood(
+        &self,
+        _plan: &NeighborhoodRetrievalPlan,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+
+    fn retrieve_similarity(
+        &self,
+        _plan: &SimilarityRetrievalPlan,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+
+    fn retrieve_filtered(
+        &self,
+        _plan: &FilteredRetrievalPlan,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+
+    fn retrieve_hybrid(
+        &self,
+        _plan: &HybridRetrievalPlan,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+
+    fn retrieve_hybrid_component(
+        &self,
+        _component: &PlannedHybridComponent,
+        context: &OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record_context(context);
+        Ok(Self::one_reference())
+    }
+}
+
+#[test]
+fn phase4_query_request_is_usable_without_core_runtime_objects() {
+    let request = QueryRequest::with_spec(
+        phase2_index_id(0xa1),
+        Some(phase2_namespace("phase4.conformance")),
+        Some(phase2_definition_id("phase4.query")),
+        Some(IndexFamily::Identity),
+        QueryKind::Exact {
+            key: KeyMaterial::text("opaque-key"),
+        },
+        None,
+        ConsistencyMode::Current,
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("logical query request should be valid without Core context");
+
+    assert!(request.validate().is_ok());
+    assert!(matches!(request.query(), QueryKind::Exact { .. }));
+}
+
+#[test]
+fn phase4_planner_resolves_generic_provider_capabilities_not_core_routing() {
+    let candidate = phase4_conformance_candidate(
+        0xa2,
+        "phase4.planner",
+        "published-v1",
+        10,
+        10,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
+        .expect("exact request should be valid");
+
+    let plan = plan_query(
+        &request,
+        vec![candidate],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    )
+    .expect("logical exact query should plan");
+
+    assert_eq!(
+        plan.capability_resolution(),
+        &CapabilityResolution::Direct(ProviderCapability::ExactLookup)
+    );
+    assert!(matches!(plan, RetrievalPlan::Exact(_)));
+}
+
+#[test]
+fn phase4_planner_consumes_caller_supplied_candidates_instead_of_creating_a_global_registry() {
+    let first = phase4_conformance_candidate(
+        0xa3,
+        "phase4.registry",
+        "published-v1",
+        11,
+        11,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::exact(*first.index_id(), KeyMaterial::text("key"))
+        .expect("request should be valid");
+
+    let plan = plan_query(
+        &request,
+        vec![first.clone()],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    )
+    .expect("caller-supplied candidate should be enough for planning");
+
+    assert_eq!(
+        plan.target()
+            .expect("single-index target should exist")
+            .index_id(),
+        first.index_id()
+    );
+    assert_eq!(
+        plan.target()
+            .expect("single-index target should exist")
+            .version()
+            .id()
+            .as_str(),
+        "published-v1"
+    );
+}
+
+#[test]
+fn phase4_retrieval_forwards_the_existing_core_operation_context_unchanged() {
+    let candidate = phase4_conformance_candidate(
+        0xa4,
+        "phase4.context",
+        "published-v1",
+        12,
+        12,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
+        .expect("request should be valid");
+    let provider =
+        ConformanceProvider::new(ProviderCapabilities::with(ProviderCapability::ExactLookup));
+    let context = operation_context("phase4-conformance-context");
+
+    let plan = plan_query(
+        &request,
+        vec![candidate],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("request should plan");
+    execute(&plan, &provider, &context).expect("retrieval should succeed");
+
+    assert!(provider.saw_context(&context));
+}
+
+#[test]
+fn phase4_retrieval_result_remains_reference_oriented() {
+    let candidate = phase4_conformance_candidate(
+        0xa5,
+        "phase4.result",
+        "published-v1",
+        13,
+        13,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
+        .expect("request should be valid");
+    let provider =
+        ConformanceProvider::new(ProviderCapabilities::with(ProviderCapability::ExactLookup));
+    let plan = plan_query(
+        &request,
+        vec![candidate],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("request should plan");
+    let result = execute(
+        &plan,
+        &provider,
+        &operation_context("phase4-reference-result"),
+    )
+    .expect("retrieval should succeed");
+
+    assert_eq!(result.hits().len(), 1);
+    assert_eq!(result.hits()[0].reference().source(), "source");
+    assert_eq!(
+        result.hits()[0].reference().object_reference(),
+        "opaque-object"
+    );
+}
+
+#[test]
+fn phase4_neighborhood_query_keeps_source_relationship_meaning_opaque() {
+    let candidate = phase4_conformance_candidate(
+        0xa6,
+        "phase4.neighborhood",
+        "published-v1",
+        14,
+        14,
+        VersionLifecycle::Published,
+    );
+    let anchor = ObjectReference::new("source", "entity:42").expect("anchor should be valid");
+    let request = QueryRequest::neighborhood(*candidate.index_id(), anchor.clone())
+        .expect("neighborhood request should be valid");
+    let plan = plan_query(
+        &request,
+        vec![candidate],
+        &ProviderCapabilities::with(ProviderCapability::NeighborhoodLookup),
+        ProviderAvailability::Available,
+    )
+    .expect("neighborhood request should plan");
+
+    match plan {
+        RetrievalPlan::Neighborhood(plan) => assert_eq!(plan.anchor(), &anchor),
+        other => panic!("expected neighborhood plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn phase4_unpublished_versions_are_not_queryable_even_when_provider_capability_exists() {
+    let candidate = phase4_conformance_candidate(
+        0xa7,
+        "phase4.unpublished",
+        "candidate-v1",
+        15,
+        15,
+        VersionLifecycle::Ready,
+    );
+    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
+        .expect("request should be valid");
+
+    let error = plan_query(
+        &request,
+        vec![candidate],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    )
+    .expect_err("unpublished candidate must never become a query plan");
+
+    assert!(matches!(
+        error,
+        nizaam_indexing::query::QueryPlanningError::ConsistencyUnsatisfied { .. }
+    ));
+}
+
+#[test]
+fn phase4_hybrid_plans_do_not_hide_heterogeneous_target_provenance() {
+    let first = phase4_conformance_candidate(
+        0xa8,
+        "phase4.hybrid.a",
+        "published-a",
+        16,
+        16,
+        VersionLifecycle::Published,
+    );
+    let second = phase4_conformance_candidate(
+        0xa9,
+        "phase4.hybrid.b",
+        "published-b",
+        16,
+        16,
+        VersionLifecycle::Published,
+    );
+    let component_a = HybridQueryComponent::with_options(
+        Some(*first.index_id()),
+        AtomicQuery::Exact {
+            key: KeyMaterial::text("a"),
+        },
+        None,
+    )
+    .expect("first hybrid component should be valid");
+    let component_b = HybridQueryComponent::with_options(
+        Some(*second.index_id()),
+        AtomicQuery::Exact {
+            key: KeyMaterial::text("b"),
+        },
+        None,
+    )
+    .expect("second hybrid component should be valid");
+    let request = QueryRequest::hybrid(*first.index_id(), vec![component_a, component_b])
+        .expect("hybrid request should be valid");
+    let provider = ConformanceProvider::new(ProviderCapabilities::with(
+        ProviderCapability::HybridRetrieval,
+    ));
+
+    let plan = plan_query(
+        &request,
+        vec![first, second],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("heterogeneous hybrid plan should remain explicit");
+
+    let error = execute(
+        &plan,
+        &provider,
+        &operation_context("phase4-conformance-hybrid"),
+    )
+    .expect_err("heterogeneous hybrid provenance must not be collapsed");
+
+    assert!(matches!(
+        error,
+        nizaam_indexing::query::RetrievalError::HybridResultUnsupported(
+            nizaam_indexing::query::RetrievalPlanValidationError::HeterogeneousHybridResultTargets
+        )
+    ));
+}
+
+#[test]
+fn phase4_stale_allowed_policy_constraints_remain_indexing_owned() {
+    let policy = FreshnessPolicy::new(2);
+    let request = QueryRequest::with_spec(
+        phase2_index_id(0xaa),
+        None,
+        None,
+        None,
+        QueryKind::Text {
+            query: KeyMaterial::text("text"),
+            parameters: None,
+        },
+        None,
+        ConsistencyMode::StaleAllowed(policy.clone()),
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("stale request should be valid");
+
+    assert_eq!(request.consistency().freshness_policy(), Some(&policy));
 }

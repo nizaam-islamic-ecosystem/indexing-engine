@@ -909,3 +909,499 @@ fn phase3_stale_prepared_candidate_cannot_overwrite_a_newer_active_version() {
     ));
     assert_eq!(published_v3.active().version().id().as_str(), "index-v3");
 }
+
+// -----------------------------------------------------------------------------
+// Phase 4 query integration coverage
+// -----------------------------------------------------------------------------
+
+use std::fmt::{Display, Formatter};
+use std::sync::{Arc, Mutex};
+
+use nizaam_indexing::consistency::{ConsistencyMode, SynchronizationSnapshot};
+use nizaam_indexing::provider::{
+    ProviderAvailability, ProviderCapabilities, ProviderCapability, RankingCandidate,
+};
+use nizaam_indexing::query::{
+    CapabilityResolution, ExactRetrievalPlan, FilteredRetrievalPlan, HybridRetrievalPlan,
+    IndexCandidate, NeighborhoodRetrievalPlan, ProviderRetriever, ResultMode, RetrievalPlan,
+    SimilarityRetrievalPlan, StructuredRetrievalPlan, TextRetrievalPlan, execute, plan_query,
+};
+
+fn phase4_definition(name: &str, family: IndexFamily) -> IndexDefinition {
+    IndexDefinition::new(
+        IndexDefinitionIdentity::new(
+            phase2_definition_id(name),
+            phase2_namespace("integration.phase4"),
+            family,
+        ),
+        phase2_key_definition(&["value"]),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        Some(phase2_source_version()),
+        Some(phase2_schema_version()),
+    )
+    .expect("phase4 definition should be valid")
+}
+
+fn phase4_candidate(
+    seed: u8,
+    definition_name: &str,
+    version: &str,
+    source_sequence: u64,
+    indexed_sequence: u64,
+    lifecycle: VersionLifecycle,
+) -> IndexCandidate {
+    let definition = phase4_definition(definition_name, IndexFamily::Identity);
+    let index_id = phase2_generated_index_id(
+        definition.namespace(),
+        definition.definition_id(),
+        definition.family(),
+        &KeyMaterial::Unsigned(u128::from(seed)),
+    );
+    let index_version = IndexVersion::with_metadata(
+        IndexVersionId::new(version).expect("phase4 version should be valid"),
+        Some(phase2_source_version()),
+        Some(phase2_schema_version()),
+        None,
+    )
+    .expect("phase4 index version should be valid");
+    let mut state = IndexVersionState::new(index_version);
+    if lifecycle != VersionLifecycle::Building {
+        state
+            .transition_to(VersionLifecycle::Validating)
+            .expect("version should enter validation");
+        state.mark_ready().expect("version should become ready");
+    }
+    if lifecycle == VersionLifecycle::Published {
+        state
+            .mark_published()
+            .expect("version should become published");
+    }
+
+    let synchronization = SynchronizationSnapshot::from_sequences(
+        nizaam_indexing::build::UpdateSequence::new(source_sequence),
+        nizaam_indexing::build::UpdateSequence::new(indexed_sequence),
+    )
+    .expect("phase4 synchronization should be valid");
+
+    IndexCandidate::new(index_id, definition, state, synchronization)
+}
+
+#[derive(Clone, Debug)]
+struct IntegrationProvider {
+    capabilities: ProviderCapabilities,
+    calls: Arc<Mutex<Vec<String>>>,
+    candidates: Vec<RankingCandidate>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IntegrationProviderError(&'static str);
+
+impl Display for IntegrationProviderError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for IntegrationProviderError {}
+
+impl IntegrationProvider {
+    fn new(capabilities: ProviderCapabilities, candidates: Vec<RankingCandidate>) -> Self {
+        Self {
+            capabilities,
+            calls: Arc::new(Mutex::new(Vec::new())),
+            candidates,
+        }
+    }
+
+    fn candidate(source: &str, object: &str) -> RankingCandidate {
+        RankingCandidate::new(
+            ObjectReference::new(source, object).expect("test reference should be valid"),
+        )
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .expect("provider call log should not be poisoned")
+            .clone()
+    }
+
+    fn record(&self, name: &str) {
+        self.calls
+            .lock()
+            .expect("provider call log should not be poisoned")
+            .push(name.to_owned());
+    }
+
+    fn clone_candidates(&self) -> Vec<RankingCandidate> {
+        self.candidates.clone()
+    }
+}
+
+impl ProviderRetriever for IntegrationProvider {
+    type Error = IntegrationProviderError;
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        ProviderAvailability::Available
+    }
+
+    fn retrieve_exact(
+        &self,
+        _plan: &ExactRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("exact");
+        Ok(self.clone_candidates())
+    }
+
+    fn retrieve_text(
+        &self,
+        _plan: &TextRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("text");
+        Ok(self.clone_candidates())
+    }
+
+    fn retrieve_structured(
+        &self,
+        _plan: &StructuredRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("structured");
+        Ok(self.clone_candidates())
+    }
+
+    fn retrieve_neighborhood(
+        &self,
+        _plan: &NeighborhoodRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("neighborhood");
+        Ok(self.clone_candidates())
+    }
+
+    fn retrieve_similarity(
+        &self,
+        _plan: &SimilarityRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("similarity");
+        Ok(self.clone_candidates())
+    }
+
+    fn retrieve_filtered(
+        &self,
+        _plan: &FilteredRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("filtered");
+        Ok(self.clone_candidates())
+    }
+
+    fn retrieve_hybrid(
+        &self,
+        _plan: &HybridRetrievalPlan,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("hybrid");
+        Ok(self.clone_candidates())
+    }
+
+    fn retrieve_hybrid_component(
+        &self,
+        _component: &nizaam_indexing::query::PlannedHybridComponent,
+        _context: &nizaam_core::operation::OperationContext,
+    ) -> Result<Vec<RankingCandidate>, Self::Error> {
+        self.record("hybrid-component");
+        Ok(self.clone_candidates())
+    }
+}
+
+#[test]
+fn phase4_request_consistency_planner_provider_and_reference_result_compose_end_to_end() {
+    let candidate = phase4_candidate(
+        0xa1,
+        "integration.phase4.exact",
+        "published-v1",
+        12,
+        12,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::with_spec(
+        *candidate.index_id(),
+        None,
+        None,
+        None,
+        nizaam_indexing::query::QueryKind::Exact {
+            key: KeyMaterial::text("mercy"),
+        },
+        std::num::NonZeroUsize::new(8),
+        ConsistencyMode::Current,
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("phase4 request should be valid");
+
+    let provider = IntegrationProvider::new(
+        ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        vec![IntegrationProvider::candidate("quran", "verse:1:1")],
+    );
+
+    let plan = plan_query(
+        &request,
+        vec![candidate.clone()],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("current exact request should produce a logical plan");
+
+    assert_eq!(
+        plan.target()
+            .expect("single-index plan should have target")
+            .index_id(),
+        candidate.index_id()
+    );
+    assert_eq!(
+        plan.capability_resolution(),
+        &CapabilityResolution::Direct(ProviderCapability::ExactLookup)
+    );
+
+    let operation = operation_context("phase4-integration-query");
+    let result = execute(&plan, &provider, &operation).expect("provider execution should succeed");
+
+    assert_eq!(result.index_id(), candidate.index_id());
+    assert_eq!(result.index_version().id().as_str(), "published-v1");
+    assert_eq!(result.hits().len(), 1);
+    assert_eq!(result.hits()[0].reference().source(), "quran");
+    assert_eq!(result.hits()[0].reference().object_reference(), "verse:1:1");
+    assert_eq!(
+        result
+            .consistency()
+            .expect("consistency metadata should exist")
+            .update_sequence_lag(),
+        Some(0)
+    );
+    assert_eq!(provider.calls(), vec!["exact"]);
+}
+
+#[test]
+fn phase4_current_query_selects_the_fresh_published_version_and_ignores_unpublished_candidates() {
+    let old = phase4_candidate(
+        0xa2,
+        "integration.phase4.current",
+        "published-v1",
+        20,
+        18,
+        VersionLifecycle::Published,
+    );
+    let current = phase4_candidate(
+        0xa2,
+        "integration.phase4.current",
+        "published-v2",
+        20,
+        20,
+        VersionLifecycle::Published,
+    );
+    let rebuilding = phase4_candidate(
+        0xa2,
+        "integration.phase4.current",
+        "candidate-v3",
+        20,
+        20,
+        VersionLifecycle::Ready,
+    );
+
+    let request = QueryRequest::exact(*old.index_id(), KeyMaterial::text("term"))
+        .expect("current exact request should be valid");
+    let provider_capabilities = ProviderCapabilities::with(ProviderCapability::ExactLookup);
+
+    let plan = plan_query(
+        &request,
+        vec![old, rebuilding, current.clone()],
+        &provider_capabilities,
+        ProviderAvailability::Available,
+    )
+    .expect("published fresh version should satisfy Current");
+
+    assert_eq!(
+        plan.target()
+            .expect("single-index plan should have target")
+            .version()
+            .id()
+            .as_str(),
+        "published-v2"
+    );
+    assert_eq!(
+        plan.target().expect("target should exist").lifecycle(),
+        VersionLifecycle::Published
+    );
+}
+
+#[test]
+fn phase4_version_pinned_query_does_not_fallback_to_another_published_version() {
+    let v1 = phase4_candidate(
+        0xa3,
+        "integration.phase4.pinned",
+        "published-v1",
+        30,
+        30,
+        VersionLifecycle::Published,
+    );
+    let v2 = phase4_candidate(
+        0xa3,
+        "integration.phase4.pinned",
+        "published-v2",
+        30,
+        30,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::with_spec(
+        *v1.index_id(),
+        None,
+        None,
+        None,
+        nizaam_indexing::query::QueryKind::Exact {
+            key: KeyMaterial::text("term"),
+        },
+        None,
+        ConsistencyMode::VersionPinned(
+            IndexVersionId::new("published-v1").expect("version ID should be valid"),
+        ),
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("pinned request should be valid");
+
+    let plan = plan_query(
+        &request,
+        vec![v2, v1.clone()],
+        &ProviderCapabilities::with(ProviderCapability::ExactLookup),
+        ProviderAvailability::Available,
+    )
+    .expect("exact requested published version should be selected");
+
+    assert_eq!(
+        plan.target()
+            .expect("single-index plan should have target")
+            .version()
+            .id()
+            .as_str(),
+        "published-v1"
+    );
+}
+
+#[test]
+fn phase4_stale_allowed_query_accepts_bounded_lag_and_records_stale_result_metadata() {
+    let stale = phase4_candidate(
+        0xa4,
+        "integration.phase4.stale",
+        "published-v1",
+        40,
+        37,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::with_spec(
+        *stale.index_id(),
+        None,
+        None,
+        None,
+        nizaam_indexing::query::QueryKind::Text {
+            query: KeyMaterial::text("knowledge"),
+            parameters: None,
+        },
+        None,
+        ConsistencyMode::StaleAllowed(nizaam_indexing::consistency::FreshnessPolicy::new(3)),
+        ResultMode::ReferencesOnly,
+        None,
+    )
+    .expect("stale-allowed request should be valid");
+
+    let provider = IntegrationProvider::new(
+        ProviderCapabilities::with(ProviderCapability::TextLookup),
+        vec![IntegrationProvider::candidate("hadith", "book:1")],
+    );
+    let plan = plan_query(
+        &request,
+        vec![stale.clone()],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("bounded stale lag should be accepted");
+
+    let result = execute(&plan, &provider, &operation_context("phase4-stale-query"))
+        .expect("stale retrieval should succeed");
+
+    assert_eq!(
+        result
+            .consistency()
+            .expect("consistency metadata should exist")
+            .state(),
+        nizaam_indexing::query::ConsistencyState::StaleAccepted
+    );
+    assert_eq!(
+        result
+            .consistency()
+            .expect("consistency metadata should exist")
+            .update_sequence_lag(),
+        Some(3)
+    );
+}
+
+#[test]
+fn phase4_hybrid_query_composes_into_a_reference_result_without_domain_hydration() {
+    let candidate = phase4_candidate(
+        0xa5,
+        "integration.phase4.hybrid",
+        "published-v1",
+        50,
+        50,
+        VersionLifecycle::Published,
+    );
+    let request = QueryRequest::hybrid(
+        *candidate.index_id(),
+        vec![
+            nizaam_indexing::query::HybridQueryComponent::new(
+                nizaam_indexing::query::AtomicQuery::Text {
+                    query: KeyMaterial::text("rust"),
+                    parameters: None,
+                },
+            )
+            .expect("text component should be valid"),
+            nizaam_indexing::query::HybridQueryComponent::new(
+                nizaam_indexing::query::AtomicQuery::Exact {
+                    key: KeyMaterial::text("book"),
+                },
+            )
+            .expect("exact component should be valid"),
+        ],
+    )
+    .expect("hybrid request should be valid");
+
+    let provider = IntegrationProvider::new(
+        ProviderCapabilities::with(ProviderCapability::HybridRetrieval),
+        vec![IntegrationProvider::candidate("source", "object-42")],
+    );
+
+    let plan = plan_query(
+        &request,
+        vec![candidate.clone()],
+        provider.capabilities(),
+        provider.availability(),
+    )
+    .expect("native hybrid should plan");
+
+    assert!(matches!(plan, RetrievalPlan::Hybrid(_)));
+    let result = execute(&plan, &provider, &operation_context("phase4-hybrid-query"))
+        .expect("hybrid retrieval should succeed");
+
+    assert_eq!(result.hits().len(), 1);
+    assert_eq!(result.hits()[0].reference().object_reference(), "object-42");
+    assert_eq!(provider.calls(), vec!["hybrid"]);
+}

@@ -293,7 +293,9 @@ fn logical_query_request_remains_provider_neutral() {
 
     assert_eq!(request.index_id().as_bytes(), &[0x22; 64]);
     assert_eq!(request.limit(), NonZeroUsize::new(10));
-    assert!(matches!(request.query(), KeyMaterial::Map(_)));
+    assert!(
+        matches!(request.query(), nizaam_indexing::QueryKind::Exact { key } if matches!(key, KeyMaterial::Map(_)))
+    );
     assert_eq!(
         request.metadata(),
         Some(&KeyMaterial::text("caller-metadata"))
@@ -371,7 +373,7 @@ fn domain_and_provider_specific_types_are_not_required_by_the_phase_two_model() 
     assert_eq!(definition.family(), IndexFamily::Inverted);
     assert_eq!(entry.target().source(), "documents");
     assert_eq!(version.id().as_str(), "documents.index-v4");
-    assert_eq!(request.query(), &KeyMaterial::text("term"));
+    assert_eq!(request.query_material(), Some(&KeyMaterial::text("term")));
 
     // This composition uses only logical Indexing contracts. No database,
     // storage-provider, partition, shard, embedding-provider, or domain
