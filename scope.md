@@ -14194,8 +14194,6 @@ Phase 6
 
 ---
 
----
-
 #### Cross-Phase Supersession Note
 
 The original Phase 0 executable decision and the original Phase 6 event wording are superseded by the approved architecture update captured at the beginning of this Phase 5 section:

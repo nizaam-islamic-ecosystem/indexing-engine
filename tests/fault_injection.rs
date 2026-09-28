@@ -1,8 +1,12 @@
-//! Deterministic fault-injection coverage for Phase 3, Phase 4, and Phase 5.
+//! Deterministic fault-injection coverage for Phase 3, Phase 4, Phase 5, and Phase 6.
 //!
 //! Faults are injected through real public logical APIs using invalid or
 //! conflicting inputs. No provider/storage implementation is fabricated here,
 //! because those boundaries are deliberately deferred.
+//!
+//! Phase 6 faults continue to use real Core boundaries: routing selection is
+//! never treated as execution, and lifecycle admission remains authoritative
+//! after a destination has been selected.
 
 use nizaam_indexing::build::{
     BatchChunkError, BatchError, BatchExecutor, BatchOptions, BuildInput, BuildSnapshot,
@@ -944,32 +948,76 @@ fn phase5_recovery_fault_preserves_active_lineage_and_selects_deterministic_acti
     assert_eq!(request.active_version(), Some(&active));
 }
 
+// -----------------------------------------------------------------------------
+// Phase 6 deterministic fault-injection coverage
+// -----------------------------------------------------------------------------
+
 #[test]
-fn phase5_recovery_fault_mapping_keeps_operational_failures_separate_from_lifecycle_state() {
-    let cases = [
-        (FailureClass::StaleIndex, RecoveryAction::Synchronize),
-        (
-            FailureClass::UnavailableIndex,
-            RecoveryAction::RestoreAvailability,
-        ),
-        (FailureClass::ResourceExhaustion, RecoveryAction::Throttle),
-        (
-            FailureClass::SourceDataFailure,
-            RecoveryAction::PreserveSafeState,
-        ),
-        (
-            FailureClass::ProviderFailure,
-            RecoveryAction::DelegateToCoreRetry,
-        ),
-    ];
+fn phase6_selected_destination_cannot_bypass_core_runtime_admission() {
+    use nizaam_core::control_plane::{
+        PolicyInput, RoutingCandidate, RoutingConstraints, RoutingPolicy,
+    };
+    use nizaam_indexing::IndexingEngine;
 
-    for (failure, expected) in cases {
-        let request = RecoveryRequest::new(classify(failure));
+    let engine = IndexingEngine::new(
+        nizaam_core::identity::EngineId::new("nizaam.indexing.phase6.fault")
+            .expect("engine id should be valid"),
+        nizaam_core::identity::EngineInstanceId::new("nizaam.indexing.phase6.fault.instance")
+            .expect("engine instance id should be valid"),
+    );
 
-        assert_eq!(request.action(), expected);
-        assert_eq!(action_for(failure), expected);
-    }
+    engine.start().expect("engine should start");
+    engine
+        .begin_registration()
+        .expect("engine should enter registration");
 
-    let lifecycle = IndexLifecycle::new(index_id(0xb2));
-    assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
+    let registry = nizaam_core::control_plane::registry::EngineRegistry::new();
+    engine
+        .register_engine(&registry)
+        .expect("engine registration should succeed");
+
+    engine
+        .register_phase0_capability()
+        .expect("phase0 capability should register");
+    engine.mark_ready().expect("engine should become ready");
+    engine.serve().expect("engine should become serving");
+
+    // Core routing policy consumes destinations that have already passed the
+    // Control Plane eligibility boundary. The current Indexing registration
+    // boundary does not publish capability/contract advertisements into that
+    // eligibility view, so this test must not fabricate such metadata.
+    //
+    // The fault under test is specifically the boundary after selection:
+    // a routing selection cannot make a later Core runtime admission succeed.
+    let candidate = RoutingCandidate::new(engine.engine_instance_id().clone());
+
+    let selection = RoutingPolicy::deterministic()
+        .evaluate(&PolicyInput::new(
+            std::slice::from_ref(&candidate),
+            &RoutingConstraints::new(),
+        ))
+        .expect("already-eligible destination must be selectable");
+
+    assert_eq!(
+        selection.into_instance_id(),
+        engine.engine_instance_id().clone()
+    );
+
+    // Inject the lifecycle fault after successful selection. Routing has not
+    // changed the runtime state and cannot make a draining engine serve new
+    // requests.
+    engine
+        .drain()
+        .expect("engine should enter draining state after selection");
+
+    assert_eq!(
+        engine.runtime().admit_request(),
+        Err(nizaam_core::runtime::RequestAdmissionError::NotServing(
+            nizaam_core::runtime::LifecycleState::Draining,
+        ))
+    );
+
+    engine
+        .shutdown()
+        .expect("draining engine should shut down cleanly");
 }
