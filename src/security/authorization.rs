@@ -106,6 +106,35 @@ impl IndexingAuthorizationRequirement {
             .authorize(&request)
             .map_err(IndexingAuthorizationError::Core)
     }
+
+    /// Evaluates the authorization requirement and enforces the Core decision.
+    ///
+    /// Unlike [`Self::authorize`], which exposes the Core decision directly,
+    /// this method is the request-boundary API for callers that must not
+    /// continue execution unless Core explicitly returns `Allow`.
+    ///
+    /// A Core `Deny` is converted into [`IndexingAuthorizationError::Denied`].
+    /// Core authorization failures and Indexing target mismatches remain
+    /// distinguishable.
+    pub fn enforce(
+        &self,
+        authorizer: &dyn Authorizer,
+        security: &SecurityContext,
+        capability: &CapabilityId,
+        target_engine_id: &EngineId,
+        target_engine_instance_id: &EngineInstanceId,
+    ) -> Result<(), IndexingAuthorizationError> {
+        match self.authorize(
+            authorizer,
+            security,
+            capability,
+            target_engine_id,
+            target_engine_instance_id,
+        )? {
+            AuthorizationDecision::Allow => Ok(()),
+            AuthorizationDecision::Deny => Err(IndexingAuthorizationError::Denied),
+        }
+    }
 }
 
 /// Errors produced while enforcing the Indexing authorization boundary.
@@ -122,6 +151,12 @@ pub enum IndexingAuthorizationError {
     /// The request targets a different concrete engine instance.
     InstanceMismatch,
 
+    /// Core completed authorization evaluation and denied the request.
+    ///
+    /// This is distinct from [`Self::Core`], which represents an authorization
+    /// mechanism failure rather than a completed denial decision.
+    Denied,
+
     /// Core could not complete authorization evaluation.
     Core(AuthorizationError),
 }
@@ -135,6 +170,7 @@ impl fmt::Display for IndexingAuthorizationError {
             Self::InstanceMismatch => {
                 formatter.write_str("authorization target engine instance does not match")
             }
+            Self::Denied => formatter.write_str("Core authorization denied the request"),
             Self::Core(error) => write!(formatter, "Core authorization failed: {error}"),
         }
     }
@@ -369,6 +405,78 @@ mod tests {
 
         assert_eq!(decision, AuthorizationDecision::Allow);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn enforce_allows_only_an_explicit_core_allow() {
+        let requirement = requirement();
+
+        requirement
+            .enforce(
+                &AllowingAuthorizer,
+                &security_context(),
+                &capability_id(),
+                &engine_id(),
+                &engine_instance_id(),
+            )
+            .expect("explicit Core allow should permit execution");
+    }
+
+    #[test]
+    fn enforce_blocks_core_denial() {
+        let requirement = requirement();
+
+        let result = requirement.enforce(
+            &DenyingAuthorizer,
+            &security_context(),
+            &capability_id(),
+            &engine_id(),
+            &engine_instance_id(),
+        );
+
+        assert_eq!(result, Err(IndexingAuthorizationError::Denied));
+    }
+
+    #[test]
+    fn enforce_preserves_core_authorization_failure() {
+        let requirement = requirement();
+
+        let result = requirement.enforce(
+            &FailingAuthorizer,
+            &security_context(),
+            &capability_id(),
+            &engine_id(),
+            &engine_instance_id(),
+        );
+
+        assert_eq!(
+            result,
+            Err(IndexingAuthorizationError::Core(AuthorizationError::Failed))
+        );
+    }
+
+    #[test]
+    fn enforce_checks_target_before_core_authorization() {
+        let requirement = requirement();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let authorizer = RecordingAuthorizer {
+            calls: Arc::clone(&calls),
+            expected_principal: principal(),
+            expected_calling_service: Some(calling_service()),
+            expected_capability: capability_id(),
+        };
+
+        let result = requirement.enforce(
+            &authorizer,
+            &security_context(),
+            &capability_id(),
+            &other_engine_id(),
+            &engine_instance_id(),
+        );
+
+        assert_eq!(result, Err(IndexingAuthorizationError::EngineMismatch));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
