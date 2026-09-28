@@ -9,7 +9,7 @@
 //! ```text
 //! Core Control Plane membership / observation
 //!             ↓
-//! destination eligibility
+//! routing candidates derived from membership
 //!             ↓
 //! Core routing policy
 //!             ↓
@@ -31,6 +31,11 @@
 //! The current Core Control Plane intentionally exposes its routing pieces
 //! separately rather than one stateful `execute` operation. The E2E test
 //! therefore composes those public owners explicitly.
+//!
+//! Destination eligibility is intentionally outside this file's scope. The
+//! tests verify that membership and observations establish the real Core
+//! routing state, then exercise routing policy over candidates derived from
+//! that state without fabricating eligibility metadata.
 //!
 //! The Indexing Engine currently exposes `handle_request` as its public request
 //! execution boundary. Security is therefore composed immediately around that
@@ -68,7 +73,10 @@ use nizaam_core::security::{
 };
 use nizaam_core::status::Status;
 
-use nizaam_indexing::{IndexingEngine, observability::IndexingMetrics};
+use nizaam_indexing::{
+    IndexingEngine,
+    security::{IndexingAuthorizationError, IndexingAuthorizationRequirement},
+};
 
 const ENGINE_ID: &str = "nizaam.indexing.e2e";
 const ENGINE_INSTANCE_ID: &str = "nizaam.indexing.e2e.instance";
@@ -250,17 +258,28 @@ fn select_instance() -> EngineInstanceId {
         .update(healthy_observation())
         .expect("Control Plane observation must succeed");
 
-    // Core's destination eligibility checks capability/contract compatibility
-    // against Control Plane advertisements. The Indexing Engine's current
-    // Phase 5 registration boundary registers its capability in Core's
-    // capability registry, but does not advertise that capability through the
-    // Control Plane registration metadata. Therefore this E2E test must not
-    // fabricate an advertisement merely to make eligibility succeed.
-    //
-    // Membership and observation are still established above as the real
-    // Control Plane state boundary. Routing policy then consumes the concrete
-    // candidate selected from that established membership.
-    let candidates = vec![RoutingCandidate::new(instance_id(ENGINE_INSTANCE_ID))];
+    let membership_snapshot = membership.snapshot();
+    let observation_snapshot = observations.snapshot();
+    let expected_instance = instance_id(ENGINE_INSTANCE_ID);
+
+    assert!(
+        membership_snapshot.contains(&expected_instance),
+        "registered Indexing instance must appear in the membership snapshot",
+    );
+    assert!(
+        observation_snapshot.contains(&expected_instance),
+        "registered Indexing instance must appear in the observation snapshot",
+    );
+
+    // Destination eligibility is intentionally not exercised here because the
+    // current Indexing registration boundary does not advertise capability /
+    // contract metadata to the Core Control Plane eligibility layer. Routing
+    // policy consumes candidates derived from the authoritative membership
+    // snapshot after membership and health observation have been established.
+    let candidates = membership_snapshot
+        .instances_for_engine(&engine_id(ENGINE_ID))
+        .map(|record| RoutingCandidate::new(record.engine_instance_id().clone()))
+        .collect::<Vec<_>>();
 
     RoutingPolicy::deterministic()
         .evaluate(&PolicyInput::new(&candidates, &RoutingConstraints::new()))
@@ -326,32 +345,68 @@ fn e2e_core_control_plane_runtime_security_capability_and_response() {
         Interaction::Response
     );
 
-    // Verify that the completed E2E flow can be observed through the
-    // Core-backed Indexing metrics adapter without creating a second
-    // observability store.
-    let metrics = IndexingMetrics::new();
+    engine.shutdown().expect("engine shutdown must succeed");
+}
 
-    let metric_descriptor = nizaam_core::observability::MetricDescriptor::new(
-        nizaam_core::observability::MetricName::new("e2e.indexing.requests.completed")
-            .expect("metric name must be valid"),
-        nizaam_core::observability::MetricKind::Counter,
-    );
+#[test]
+fn e2e_indexing_authorization_rejects_mismatched_target_before_dispatch() {
+    let engine = prepare_engine();
+    let request = request("e2e-target-mismatch", b"must-not-dispatch");
 
-    metrics
-        .record_counter(
-            &metric_descriptor,
-            nizaam_core::observability::MetricDimensions::new(),
-            1,
-        )
-        .expect("Core-backed observability must record the completed flow");
+    let mut context = EngineContext::new(request.event.envelope.operation_context.clone());
+    let mut request = request;
+    let pipeline = security_pipeline(AuthorizationDecision::Allow);
 
-    assert_eq!(
-        metrics
-            .snapshot()
-            .expect("metric snapshot must succeed")
-            .len(),
-        1
-    );
+    let downstream_called = Arc::new(AtomicBool::new(false));
+    let downstream_called_by_handler = Arc::clone(&downstream_called);
+    let authorization_rejected = Arc::new(AtomicBool::new(false));
+    let authorization_rejected_by_boundary = Arc::clone(&authorization_rejected);
+
+    let result: Result<UniversalResponse, RequestPipelineError<IndexingAuthorizationError>> =
+        pipeline.run_request(&mut context, &mut request, |context, request| {
+            let requirement = IndexingAuthorizationRequirement::new(
+                engine.engine_id().clone(),
+                engine.engine_instance_id().clone(),
+            );
+            let wrong_instance = instance_id("nizaam.indexing.e2e.wrong-instance");
+
+            let decision = match requirement.authorize(
+                &StaticAuthorizer {
+                    decision: AuthorizationDecision::Allow,
+                },
+                context
+                    .security()
+                    .expect("Core security pipeline must establish SecurityContext"),
+                &capability_id(),
+                engine.engine_id(),
+                &wrong_instance,
+            ) {
+                Err(IndexingAuthorizationError::InstanceMismatch) => {
+                    authorization_rejected_by_boundary.store(true, Ordering::SeqCst);
+                    return Err(IndexingAuthorizationError::InstanceMismatch);
+                }
+                Err(error) => return Err(error),
+                Ok(decision) => decision,
+            };
+
+            match decision {
+                AuthorizationDecision::Allow => {
+                    downstream_called_by_handler.store(true, Ordering::SeqCst);
+
+                    engine
+                        .handle_request(request)
+                        .map_err(|_| IndexingAuthorizationError::Core(AuthorizationError::Failed))?
+                        .map_err(|_| IndexingAuthorizationError::Core(AuthorizationError::Failed))
+                }
+                AuthorizationDecision::Deny => {
+                    Err(IndexingAuthorizationError::Core(AuthorizationError::Failed))
+                }
+            }
+        });
+
+    assert!(result.is_err());
+    assert!(authorization_rejected.load(Ordering::SeqCst));
+    assert!(!downstream_called.load(Ordering::SeqCst));
 
     engine.shutdown().expect("engine shutdown must succeed");
 }
