@@ -1,4 +1,4 @@
-//! Phase 2 + Phase 3 + Phase 5 architectural conformance tests.
+//! Phase 2 + Phase 3 + Phase 5 + Phase 6 architectural conformance tests.
 //!
 //! These tests protect the boundaries established between `nizaam-indexing`
 //! and `nizaam-core`. They preserve the Phase 0 runtime/capability checks while
@@ -14,6 +14,11 @@
 //! Phase 3 coverage additionally verifies that candidate construction, updates,
 //! rebuild/replay, and publication remain Indexing-local logical boundaries and
 //! do not replace Core runtime/capability ownership.
+//! Phase 6 coverage verifies that the final integration layer remains a thin
+//! composition boundary: Core Control Plane selection does not execute work,
+//! health/readiness observation does not mutate Indexing lifecycle state, and
+//! logical indexing correctness does not depend on a second observability
+//! framework.
 
 mod common;
 
@@ -1482,6 +1487,93 @@ fn phase4_stale_allowed_policy_constraints_remain_indexing_owned() {
 // -----------------------------------------------------------------------------
 // Phase 5 architectural conformance coverage
 // -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Phase 6 architectural conformance coverage
+// -----------------------------------------------------------------------------
+
+#[test]
+fn phase6_control_plane_selection_does_not_execute_or_admit_indexing_work() {
+    use nizaam_core::control_plane::{
+        PolicyInput, RoutingCandidate, RoutingConstraints, RoutingPolicy,
+    };
+
+    let engine = test_engine();
+    let candidate = RoutingCandidate::new(engine.engine_instance_id().clone());
+
+    let selection = RoutingPolicy::deterministic()
+        .evaluate(&PolicyInput::new(
+            std::slice::from_ref(&candidate),
+            &RoutingConstraints::new(),
+        ))
+        .expect("an already-eligible candidate should be selectable");
+
+    assert_eq!(selection.instance_id(), engine.engine_instance_id());
+
+    // Core Control Plane selection is not execution and does not establish
+    // runtime admission. The Indexing engine remains in its initial lifecycle
+    // state and has no registered capability at this point.
+    assert_eq!(engine.runtime().state(), LifecycleState::Created);
+    assert!(engine.capabilities().is_empty());
+    assert_eq!(
+        engine.runtime().admit_request(),
+        Err(RequestAdmissionError::NotServing(LifecycleState::Created))
+    );
+}
+
+#[test]
+fn phase6_readiness_observation_does_not_mutate_index_or_engine_lifecycle() {
+    let engine = test_engine();
+    let mut lifecycle = IndexLifecycle::new(phase2_index_id(0xc1));
+
+    lifecycle
+        .mark_building()
+        .expect("Creating -> Building should be valid");
+    lifecycle
+        .mark_validating()
+        .expect("Building -> Validating should be valid");
+    lifecycle
+        .mark_ready()
+        .expect("Validating -> Ready should be valid");
+    lifecycle
+        .mark_active()
+        .expect("Ready -> Active should be valid");
+
+    let readiness = nizaam_core::health::readiness::ReadinessState::from(engine.runtime().state());
+
+    assert_eq!(
+        readiness,
+        nizaam_core::health::readiness::ReadinessState::NotReady
+    );
+    assert!(!readiness.is_ready());
+
+    // Health/readiness is observational in Phase 6. It does not implicitly
+    // promote the Core runtime or mutate the independent Indexing lifecycle.
+    assert_eq!(engine.runtime().state(), LifecycleState::Created);
+    assert_eq!(lifecycle.state(), IndexLifecycleState::Active);
+}
+
+#[test]
+fn phase6_logical_index_correctness_has_no_observability_dependency() {
+    let candidate = phase3_candidate(
+        0xc2,
+        "phase6-observability-independent-v1",
+        vec![phase3_entry("opaque", "doc:1")],
+    );
+
+    // The candidate is fully constructed and validated through the logical
+    // Indexing contracts without constructing a logger, metric recorder,
+    // tracer, diagnostics store, exporter, or other observability mechanism.
+    assert_eq!(
+        candidate.version().id().as_str(),
+        "phase6-observability-independent-v1"
+    );
+    assert_eq!(candidate.len(), 1);
+    assert_eq!(candidate.entries()[0].target().object_reference(), "doc:1");
+
+    // Observability may describe this operation, but it is not a correctness
+    // dependency of the logical build boundary.
+}
 
 #[test]
 fn phase5_index_lifecycle_is_local_and_does_not_control_core_runtime_lifecycle() {

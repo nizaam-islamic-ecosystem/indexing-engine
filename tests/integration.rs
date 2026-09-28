@@ -1,5 +1,5 @@
 //! Repository-level integration tests for the Phase 0, Phase 2, Phase 3, Phase 4,
-//! and Phase 5 public API.
+//! Phase 5, and Phase 6 public API.
 //!
 //! Phase 0 coverage preserves the complete Core-backed execution path:
 //!
@@ -48,6 +48,12 @@
 //! These tests intentionally stop at logical contracts and do not perform
 //! physical index construction, provider execution, storage, embedding
 //! generation, or domain-object hydration.
+//!
+//! Phase 6 additionally verifies the real Core integration boundaries without
+//! introducing a second runtime, Control Plane, security framework, or
+//! observability system. Security-context propagation into the Indexing
+//! capability is intentionally not asserted here until the public request
+//! boundary accepts the same Core EngineContext established by middleware.
 
 mod common;
 
@@ -1521,6 +1527,129 @@ fn phase5_recovery_keeps_the_known_good_active_version_observationally_protected
     // Recovery receives the active version only as lineage/protection context.
     // No mutation API is exposed by RecoveryRequest.
     assert_eq!(active.as_str(), "integration.phase5.active-v7");
+}
+
+// -----------------------------------------------------------------------------
+// Phase 6 Core integration coverage
+// -----------------------------------------------------------------------------
+
+#[test]
+fn phase6_control_plane_selection_integrates_with_registered_indexing_identity_without_executing_work()
+ {
+    use nizaam_core::control_plane::{
+        EngineObservation, EngineRegistration, Membership, Observations, PolicyInput,
+        RoutingCandidate, RoutingConstraints, RoutingPolicy,
+    };
+    use nizaam_core::health::{HealthReport, LivenessReport, ReadinessReport};
+
+    let (engine, _registry, _capability_id) = prepared_engine();
+    let membership = Membership::new();
+    let observations = Observations::new();
+
+    membership
+        .register(EngineRegistration::new(
+            engine.engine_id().clone(),
+            engine.engine_instance_id().clone(),
+        ))
+        .expect("Core membership registration should succeed");
+
+    let health = HealthReport::new(
+        engine.engine_id().clone(),
+        LifecycleState::Serving,
+        LivenessReport::healthy(),
+        ReadinessReport::from_lifecycle(LifecycleState::Serving),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("serving health report should be valid");
+
+    observations
+        .update(
+            EngineObservation::new(
+                engine.engine_id().clone(),
+                engine.engine_instance_id().clone(),
+                health,
+            )
+            .expect("engine observation should be valid"),
+        )
+        .expect("Core observation update should succeed");
+
+    // Core routing policy operates only on destinations that have already
+    // passed the separate Control Plane eligibility boundary. The Indexing
+    // registration boundary does not publish a capability/contract
+    // advertisement for `eligible_destinations`, so this test must not
+    // fabricate one merely to make eligibility succeed.
+    //
+    // Membership and observation registration above still establish the
+    // concrete Indexing identity in the Control Plane's routing view. The
+    // routing-policy layer then consumes that already-eligible identity.
+    let candidates = vec![RoutingCandidate::new(engine.engine_instance_id().clone())];
+
+    let selection = RoutingPolicy::deterministic()
+        .evaluate(&PolicyInput::new(&candidates, &RoutingConstraints::new()))
+        .expect("registered Indexing instance should be selectable");
+
+    assert_eq!(
+        selection.into_instance_id(),
+        engine.engine_instance_id().clone()
+    );
+
+    // Selection is not execution. No request has been dispatched and the
+    // Core-backed Indexing state remains exactly as it was before routing.
+    assert_eq!(engine.runtime().state(), LifecycleState::Serving);
+    assert_eq!(engine.capabilities().len(), 1);
+
+    engine.shutdown().expect("engine shutdown should succeed");
+}
+
+#[test]
+fn phase6_core_health_observation_does_not_mutate_indexing_lifecycle() {
+    use nizaam_core::control_plane::{EngineObservation, Observations};
+    use nizaam_core::health::{HealthReport, LivenessReport, ReadinessReport};
+
+    let (engine, _registry, _capability_id) = prepared_engine();
+    let mut index_lifecycle = IndexLifecycle::new(phase2_index_id(0xc1));
+
+    index_lifecycle
+        .mark_building()
+        .expect("Creating -> Building should be valid");
+    index_lifecycle
+        .mark_validating()
+        .expect("Building -> Validating should be valid");
+    index_lifecycle
+        .mark_ready()
+        .expect("Validating -> Ready should be valid");
+    index_lifecycle
+        .mark_active()
+        .expect("Ready -> Active should be valid");
+
+    let health = HealthReport::new(
+        engine.engine_id().clone(),
+        LifecycleState::Serving,
+        LivenessReport::healthy(),
+        ReadinessReport::from_lifecycle(LifecycleState::Serving),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("health report should be valid");
+
+    Observations::new()
+        .update(
+            EngineObservation::new(
+                engine.engine_id().clone(),
+                engine.engine_instance_id().clone(),
+                health,
+            )
+            .expect("observation should be valid"),
+        )
+        .expect("health observation should succeed");
+
+    // Phase 6 health/readiness is observational. It cannot promote, drain,
+    // retire, or otherwise mutate either lifecycle owner.
+    assert_eq!(engine.runtime().state(), LifecycleState::Serving);
+    assert_eq!(index_lifecycle.state(), IndexLifecycleState::Active);
+
+    engine.shutdown().expect("engine shutdown should succeed");
 }
 
 #[test]

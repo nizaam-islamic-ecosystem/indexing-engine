@@ -1,10 +1,13 @@
-//! Lifecycle and operational-pressure tests for the Phase 3 and Phase 5 logical
-//! indexing system.
+//! Lifecycle and operational-pressure tests for the Phase 3, Phase 5, and Phase 6
+//! logical indexing system.
 //!
 //! These are correctness stress tests, not benchmarks. They exercise many
 //! independent candidates, repeated bounded chunks, replay pressure, and
 //! concurrent stateless construction without freezing a synchronization
 //! primitive or introducing provider/storage assumptions.
+//!
+//! Phase 6 additionally stresses the Core routing boundary without treating
+//! routing as execution or introducing a second scheduler/runtime.
 
 use std::sync::Barrier;
 use std::thread;
@@ -827,6 +830,115 @@ fn phase5_integrity_validation_remains_stateless_under_concurrent_pressure() {
             .join()
             .expect("integrity worker should complete without panic");
     }
+}
+
+// -----------------------------------------------------------------------------
+// Phase 6 Core-boundary pressure coverage
+// -----------------------------------------------------------------------------
+
+#[test]
+fn phase6_concurrent_control_plane_selection_remains_stateless_and_does_not_mutate_runtime() {
+    use nizaam_core::control_plane::{
+        EngineObservation, EngineRegistration, Membership, Observations, PolicyInput,
+        RoutingCandidate, RoutingConstraints, RoutingPolicy,
+    };
+    use nizaam_core::health::{HealthReport, LivenessReport, ReadinessReport};
+    use nizaam_core::identity::EngineId;
+    use nizaam_core::runtime::LifecycleState;
+    use nizaam_indexing::IndexingEngine;
+
+    let engine = IndexingEngine::new(
+        EngineId::new("nizaam.indexing.phase6.stress").expect("engine id should be valid"),
+        nizaam_core::identity::EngineInstanceId::new("nizaam.indexing.phase6.stress.instance")
+            .expect("engine instance id should be valid"),
+    );
+
+    engine.start().expect("engine should start");
+    engine
+        .begin_registration()
+        .expect("engine should enter registration");
+    let registry = nizaam_core::control_plane::registry::EngineRegistry::new();
+    engine
+        .register_engine(&registry)
+        .expect("engine registration should succeed");
+    let _capability_id = engine
+        .register_phase0_capability()
+        .expect("phase0 capability should register");
+    engine.mark_ready().expect("engine should become ready");
+    engine.serve().expect("engine should become serving");
+
+    let membership = Membership::new();
+    let observations = Observations::new();
+
+    membership
+        .register(EngineRegistration::new(
+            engine.engine_id().clone(),
+            engine.engine_instance_id().clone(),
+        ))
+        .expect("membership registration should succeed");
+
+    let health = HealthReport::new(
+        engine.engine_id().clone(),
+        LifecycleState::Serving,
+        LivenessReport::healthy(),
+        ReadinessReport::from_lifecycle(LifecycleState::Serving),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("health report should be valid");
+
+    observations
+        .update(
+            EngineObservation::new(
+                engine.engine_id().clone(),
+                engine.engine_instance_id().clone(),
+                health,
+            )
+            .expect("observation should be valid"),
+        )
+        .expect("observation update should succeed");
+
+    // Core routing policy consumes destinations that have already passed the
+    // separate eligibility boundary. The current Indexing registration
+    // boundary does not publish a capability/contract advertisement for
+    // `eligible_destinations`, so this test must not fabricate one merely to
+    // make eligibility succeed.
+    //
+    // Membership and health observation above establish the Indexing
+    // instance in the Control Plane view. The concurrent routing pressure
+    // below exercises only the policy-selection boundary.
+    let candidates = std::sync::Arc::new(vec![RoutingCandidate::new(
+        engine.engine_instance_id().clone(),
+    )]);
+
+    let mut handles = Vec::with_capacity(16);
+
+    for _ in 0..16usize {
+        let candidates = std::sync::Arc::clone(&candidates);
+        let expected = engine.engine_instance_id().clone();
+
+        handles.push(thread::spawn(move || {
+            let selected = RoutingPolicy::deterministic()
+                .evaluate(&PolicyInput::new(
+                    candidates.as_ref(),
+                    &RoutingConstraints::new(),
+                ))
+                .expect("deterministic selection should succeed");
+
+            assert_eq!(selected.into_instance_id(), expected);
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("routing worker should complete");
+    }
+
+    // Routing pressure did not mutate lifecycle state and did not execute a
+    // capability. The engine remains serving with its original single probe.
+    assert_eq!(engine.runtime().state(), LifecycleState::Serving);
+    assert_eq!(engine.capabilities().len(), 1);
+
+    engine.shutdown().expect("engine shutdown should succeed");
 }
 
 #[test]

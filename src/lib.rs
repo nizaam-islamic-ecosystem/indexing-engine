@@ -2,7 +2,7 @@
 //!
 //! The crate root exposes the established Indexing module tree and the public
 //! logical contracts implemented across Phase 1, Phase 2, Phase 3, Phase 4,
-//! and Phase 5.
+//! Phase 5, and Phase 6.
 //!
 //! The public boundary keeps ownership explicit:
 //! - `identity` defines Indexing identities and logical namespaces.
@@ -26,9 +26,15 @@
 //!   execution without replacing Core retry policy.
 //! - `event` defines the typed Indexing event/result content carried through
 //!   Core's existing universal request/response infrastructure.
-//! - Core-owned runtime, capability, lifecycle, contract, and execution
-//!   infrastructure remains owned by `nizaam-core` and is surfaced here only
-//!   through the Indexing engine API where required.
+//! - `observability` defines thin Indexing-facing adapters over Core's logging,
+//!   metrics, tracing, and diagnostics mechanisms.
+//! - `security` defines the Indexing-specific authorization target boundary
+//!   while Core remains the owner of authentication, authorization evaluation,
+//!   security context propagation, and security middleware.
+//! - Core-owned runtime, capability, lifecycle, contract, execution,
+//!   configuration, security, and observability infrastructure remains owned by
+//!   `nizaam-core` and is surfaced here only through the appropriate Indexing
+//!   API boundaries.
 //!
 //! Physical storage, index construction, physical retrieval algorithms,
 //! provider implementations, and domain semantics remain outside these logical
@@ -56,7 +62,9 @@ pub use engine::{
     CapabilitySet, EngineSetupError, IndexingEngine, IndexingRegistration, IndexingRuntime,
     RegistrationResult, RequestHandlingError, RuntimeDispatchResult, UniversalRequestResult,
 };
+
 pub use error::IndexingResult;
+
 pub use identity::{
     INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexDefinitionId, IndexDefinitionIdValidationError,
     IndexDefinitionIdentity, IndexId, IndexIdGenerationError, IndexIdGenerationVersion,
@@ -79,6 +87,7 @@ pub use index::{
     SourceVersionValidationError, TargetReferenceType, TargetReferenceTypeValidationError,
     Uniqueness, VersionLifecycle, VersionLifecycleTransitionError, VersionValueValidationError,
 };
+
 pub use requirement::{IndexRequirement, IndexRequirementValidationError};
 
 // -----------------------------------------------------------------------------
@@ -158,11 +167,10 @@ pub use provider::{
 // -----------------------------------------------------------------------------
 // Phase 4 canonical query public surface
 // -----------------------------------------------------------------------------
-//
+
 // QueryRequest / QueryHit / QueryResult remain re-exported above through
 // `index` for backward compatibility. The additional Phase 4 contracts are
 // surfaced here without creating duplicate root names.
-
 pub use query::{
     AtomicQuery, AtomicQueryValidationError, CandidateValidationError, CapabilityResolution,
     ConsistencyMetadata, ConsistencyMetadataValidationError, ConsistencyState, ExactRetrievalPlan,
@@ -174,3 +182,77 @@ pub use query::{
     SimilarityRetrievalPlan, StructuredRetrievalPlan, TextRetrievalPlan, execute, plan_query,
     validate_plan,
 };
+
+// -----------------------------------------------------------------------------
+// Phase 6 observability public surface
+// -----------------------------------------------------------------------------
+
+pub use observability::{IndexingDiagnostics, IndexingLogger, IndexingMetrics, IndexingTracer};
+
+// -----------------------------------------------------------------------------
+// Phase 6 security public surface
+// -----------------------------------------------------------------------------
+
+pub use security::{IndexingAuthorizationError, IndexingAuthorizationRequirement};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // Level 2: Phase 6 public observability boundary
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn phase_6_observability_adapters_are_exposed_at_crate_root() {
+        let diagnostics = IndexingDiagnostics::new();
+        let metrics = IndexingMetrics::new();
+        let tracer = IndexingTracer::new();
+
+        assert_eq!(diagnostics, IndexingDiagnostics::new());
+        assert_eq!(tracer, IndexingTracer::new());
+        assert!(metrics.snapshot().unwrap().is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Level 2: Phase 6 security boundary
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn phase_6_security_requirement_is_exposed_at_crate_root() {
+        use nizaam_core::identity::{EngineId, EngineInstanceId};
+
+        let engine_id =
+            EngineId::new("nizaam.indexing.test").expect("test engine id must be valid");
+        let instance_id = EngineInstanceId::new("nizaam.indexing.test.instance")
+            .expect("test engine instance id must be valid");
+
+        let requirement =
+            IndexingAuthorizationRequirement::new(engine_id.clone(), instance_id.clone());
+
+        assert_eq!(requirement.engine_id(), &engine_id);
+        assert_eq!(requirement.engine_instance_id(), &instance_id);
+        assert!(requirement.matches_target(&engine_id, &instance_id));
+    }
+
+    // -------------------------------------------------------------------------
+    // Level 2: existing public contract regression
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn existing_event_public_surface_remains_available() {
+        let _ = core::any::TypeId::of::<IndexEvent>();
+        let _ = core::any::TypeId::of::<IndexEventResponse>();
+        let _ = core::any::TypeId::of::<IndexEventResult<()>>();
+        let _ = core::any::TypeId::of::<IndexEventValidationError>();
+    }
+
+    #[test]
+    fn existing_configuration_public_surface_remains_available() {
+        let configuration = IndexingConfiguration::new(8, 2, 2, 1, 16, 1024, 128, 32)
+            .expect("test configuration should be valid");
+
+        assert_eq!(configuration.max_concurrent_queries().get(), 8);
+        assert_eq!(configuration.max_batch_size().get(), 1024);
+    }
+}
