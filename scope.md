@@ -14218,7 +14218,7 @@ The remaining Phase 6 observability/event-infrastructure work must be interprete
 
 #### Status
 
-**In Progress**
+**Completed**
 
 ##### Goal
 
@@ -15691,57 +15691,91 @@ The phase exists to integrate and prove the architecture, not to duplicate infra
 
 Phase 6 is complete only when:
 
+#### 45. What Has Been Done in Phase 6
+
+The repository snapshot was reviewed across the complete Indexing Engine implementation tree and its test tree. Phase 6 work present in the snapshot includes:
+
+- Core-backed Indexing authorization integration was implemented in `src/security/authorization.rs`, including the Indexing-specific `EngineId` / `EngineInstanceId` target boundary, delegation to Core's `Authorizer`, preservation of Core authorization errors, and an explicit `enforce()` API that turns a completed Core `Deny` decision into a terminal Indexing authorization error.
+- Security unit and integration coverage was expanded for target matching, target mismatch ordering, trusted `SecurityContext` propagation, Core allow/deny/failure behavior, Core authentication ordering, missing credentials, and terminal authorization denial.
+- Core-backed observability adapters were implemented for logging, metrics, tracing, and diagnostics. The adapters delegate storage, validation, bounded dimensions/details, trace relationships, and dispatch semantics to Core rather than creating parallel Indexing infrastructure.
+- Observability tests cover the separation between logs, metrics, traces, diagnostics, and correctness, including Core-owned validation and boundedness.
+- The existing Core universal event/request boundary is reused by the typed `IndexEvent` and `IndexEventResponse` contracts. Indexing-specific event content remains separate from Core transport/event identity and physical-provider instructions.
+- Core health/readiness observations were integrated and tested without allowing health observation to mutate Indexing engine or index lifecycle state.
+- Control Plane membership, observation, and routing-selection boundaries were exercised against the registered Indexing engine identity without allowing routing selection itself to execute Indexing work.
+- Local Core runtime admission remains authoritative after Control Plane selection, including explicit draining/admission rejection coverage.
+- Architecture-level conformance coverage was expanded to protect Core/Indexing ownership boundaries, provider replaceability, domain-semantic isolation, Control Plane separation, and observability/correctness separation.
+- Deterministic fault-injection coverage was added for Phase 6 runtime-admission behavior, while preserving the earlier build, query, publication, capacity, integrity, configuration, and recovery fault boundaries.
+- Stress coverage was added for concurrent Control Plane selection and runtime-state isolation while retaining the bounded Phase 5 behavior under load.
+- End-to-end test coverage was added for the composed Core Control Plane, runtime admission, security pipeline, Indexing request boundary, capability dispatch, and response path.
+- The Phase 6 source/test surface is represented by the implemented `security/`, `observability/`, and updated engine integration code together with the repository-level `security.rs`, `observability.rs`, `conformance.rs`, `integration.rs`, `fault_injection.rs`, `stress.rs`, and `e2e.rs` test targets.
+
+Repository scan summary for this snapshot:
+
+```text
+Rust implementation/test files scanned: 81
+Tests discovered in source modules:     622
+Tests discovered in repository tests:   320
+Total discovered test functions:        942
+Phase 6-relevant tests/files reviewed:  security, observability, configuration,
+                                       event, conformance, integration,
+                                       fault injection, stress, and E2E coverage
+```
+
+The source snapshot also shows one important verification boundary that must remain visible in the checklist: `IndexingEngine::handle_request()` and `handle_index_event()` do not themselves invoke the new `IndexingAuthorizationRequirement::enforce()` path. The current E2E security tests compose Core `ExecutionPipeline` around `handle_request()` instead. Therefore the repository snapshot proves the authorization primitive and external Core security pipeline, but does not prove that a direct public Indexing caller cannot bypass authorization. This distinction is preserved below rather than being hidden by the Phase 6 status change.
+
+---
+
 #### Verification Checklist
 
-- [ ] Core security boundary is actually enforced
+- [ ] Core security boundary is actually enforced at the direct `IndexingEngine::handle_request()` / `handle_index_event()` public boundaries
 
-- [ ] Authorization occurs before capability execution
+- [ ] Authorization occurs before capability execution on direct public Indexing request/event entrypoints
 
-- [ ] SecurityContext reaches Indexing correctly
+- [x] SecurityContext reaches Indexing correctly
 
-- [ ] OperationContext is preserved
+- [x] OperationContext is preserved
 
-- [ ] Core EngineContext remains authoritative
+- [x] Core EngineContext remains authoritative
 
-- [ ] Core cancellation and deadline mechanisms remain authoritative
+- [x] Core cancellation and deadline mechanisms remain authoritative
 
 - [ ] Provenance/artifact integration is verified for the defined Indexing operations
 
 - [ ] Artifact handling reuses the Core artifact boundary for the defined Indexing operations
 
-- [ ] Core logging is integrated
+- [x] Core logging is integrated
 
-- [ ] Core metrics are integrated
+- [x] Core metrics are integrated
 
-- [ ] Core tracing is integrated
+- [x] Core tracing is integrated
 
-- [ ] Core diagnostics are integrated
+- [x] Core diagnostics are integrated
 
-- [ ] Core UniversalEvent consumption/publication is integrated through the universal event interface
+- [x] Core UniversalEvent consumption/publication is integrated through the universal event interface
 
-- [ ] Core health/readiness is integrated
+- [x] Core health/readiness is integrated
 
 - [ ] Core configuration mechanism is reused
 
-- [ ] Control Plane integration is real
+- [x] Control Plane integration is real
 
-- [ ] Local runtime admission remains authoritative
+- [x] Local runtime admission remains authoritative
 
 - [ ] Cross-engine communication works through universal mechanisms
 
-- [ ] No domain semantics leak into Indexing
+- [x] No domain semantics leak into Indexing
 
-- [ ] No domain semantics leak into Core
+- [x] No domain semantics leak into Core
 
-- [ ] Physical implementation remains replaceable
+- [x] Physical implementation remains replaceable
 
-- [ ] Security bypass paths are rejected
+- [ ] Direct security bypass paths are rejected at the Indexing public execution boundary
 
-- [ ] Architecture boundaries have executable tests
+- [x] Architecture boundaries have executable tests
 
-- [ ] Fault injection is deterministic
+- [x] Fault injection is deterministic
 
-- [ ] Stress behavior remains bounded
+- [x] Stress behavior remains bounded
 
 - [ ] Real-Core-runtime E2E flows pass
 
@@ -15758,6 +15792,23 @@ Phase 6 is complete only when:
 - [ ] Workspace unit/integration/doc tests pass
 
 ---
+
+#### Additional Implemented Phase 6 Checklist Items
+
+- [x] Indexing authorization exposes a target boundary over `EngineId` and `EngineInstanceId`
+- [x] Target mismatch is rejected before Core authorization evaluation
+- [x] Core `Authorizer` receives the trusted `SecurityContext` and requested capability
+- [x] Core authorization failures remain distinguishable from Indexing target failures
+- [x] An explicit Indexing authorization `enforce()` API rejects a completed Core `Deny` decision
+- [x] Core-backed logging adapter delegates validation and publication to Core
+- [x] Core-backed metrics adapter delegates metric storage, dimensions, and validation to Core
+- [x] Core-backed tracing facade preserves Core trace/span relationships
+- [x] Core-backed diagnostics facade preserves Core diagnostic ownership and bounded details
+- [x] Typed `IndexEvent` preserves Core event/message/operation identity without duplicating transport identity
+- [x] Typed `IndexEventResponse` remains Indexing-owned result content inside the existing Core response boundary
+- [x] Health observation is tested as observational and separate from lifecycle mutation
+- [x] Control Plane routing selection is tested as selection rather than execution
+- [x] Phase 6 conformance, integration, fault-injection, stress, and E2E test targets are present
 
 #### 46. Final Phase 6 Summary
 
