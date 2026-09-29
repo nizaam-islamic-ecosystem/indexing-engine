@@ -755,13 +755,10 @@ mod tests {
         ObjectReference, SchemaVersion, SourceVersion, TargetReferenceType, Uniqueness,
     };
 
-    fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
-        IndexDefinitionIdentity::new(
-            IndexDefinitionId::new(format!("documents.v{seed:02x}"))
-                .expect("test definition ID should be valid"),
-            IndexNamespace::new("search.documents").expect("test namespace should be valid"),
-            IndexFamily::Inverted,
-        )
+    fn definition_identity(_seed: u8) -> IndexDefinitionIdentity {
+        definition(Some("source-v1"), Some("schema-v1"))
+            .identity()
+            .clone()
     }
 
     fn version_id(value: &str) -> IndexVersionId {

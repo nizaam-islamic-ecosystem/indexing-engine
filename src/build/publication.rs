@@ -679,13 +679,9 @@ mod tests {
         IndexVersionId::new(value).expect("test version ID should be valid")
     }
 
-    fn definition() -> IndexDefinition {
+    fn definition_for(identity: IndexDefinitionIdentity) -> IndexDefinition {
         IndexDefinition::new(
-            IndexDefinitionIdentity::new(
-                IndexDefinitionId::new("test.publication").expect("definition ID should be valid"),
-                IndexNamespace::new("test").expect("namespace should be valid"),
-                IndexFamily::Inverted,
-            ),
+            identity,
             KeyDefinition::new(["text"]).expect("key definition should be valid"),
             TargetReferenceType::new("object").expect("target reference type should be valid"),
             Uniqueness::NonUnique,
@@ -697,13 +693,17 @@ mod tests {
         .expect("definition should be valid")
     }
 
+    fn definition() -> IndexDefinition {
+        definition_for(definition_identity())
+    }
+
     fn test_candidate(
         definition_identity: IndexDefinitionIdentity,
         version: &str,
     ) -> BuildCandidate {
         let input = BuildInput::new(
-            definition_identity,
-            definition(),
+            definition_identity.clone(),
+            definition_for(definition_identity),
             version_id(version),
             BuildSnapshot::new(std::iter::empty()),
         );

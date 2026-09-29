@@ -45,7 +45,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::{
-    env,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -252,6 +251,7 @@ pub struct IndexingEngine {
     registration: IndexingRegistration,
     runtime: IndexingRuntime,
     capabilities: CapabilitySet,
+    operation_root: PathBuf,
     engine_registered: AtomicBool,
     phase0_capability_registered: AtomicBool,
 }
@@ -424,17 +424,17 @@ impl std::fmt::Display for IndexEventHandlingError {
             Self::OperationInProgress { index_id } => write!(
                 formatter,
                 "Index Assignment Operation {} is already in progress",
-                &hex_encode(index_id.as_bytes()),
+                hex_encode(index_id.as_bytes()),
             ),
             Self::OperationAlreadyCompleted { index_id } => write!(
                 formatter,
                 "Index Assignment Operation {} is already completed",
-                &hex_encode(index_id.as_bytes()),
+                hex_encode(index_id.as_bytes()),
             ),
             Self::OperationConflict { index_id } => write!(
                 formatter,
                 "Index Assignment Operation {} conflicts with an existing event or operation identity",
-                &hex_encode(index_id.as_bytes()),
+                hex_encode(index_id.as_bytes()),
             ),
             Self::Persistence(error) => {
                 write!(
@@ -496,16 +496,14 @@ pub type UniversalRequestResult =
 /// The operation journal is intentionally outside Core. Core owns transport,
 /// lifecycle, admission, cancellation, deadlines, and capability execution;
 /// Indexing owns the durable record of its typed assignment operation.
-fn indexing_operation_directory() -> Result<PathBuf, IndexEventHandlingError> {
-    let home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .ok_or_else(|| {
-            IndexEventHandlingError::Persistence(
-                "neither HOME nor USERPROFILE is available".to_owned(),
-            )
-        })?;
+fn indexing_operation_directory(root_directory: &Path) -> Result<PathBuf, IndexEventHandlingError> {
+    if root_directory.as_os_str().is_empty() {
+        return Err(IndexEventHandlingError::Persistence(
+            "Indexing operation root must not be empty".to_owned(),
+        ));
+    }
 
-    Ok(PathBuf::from(home).join(".nizaam").join("indexing"))
+    Ok(root_directory.to_path_buf())
 }
 
 /// Returns the durable directory for one deterministic Index Assignment
@@ -819,31 +817,54 @@ fn existing_operation_state(
     let mut saw_completed = false;
     let mut saw_started = false;
 
-    for line in contents.lines() {
+    for (line_number, line) in contents.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
 
-        let stored_event_id = json_field(line, "event_id");
-        let stored_operation_id = json_field(line, "operation_id");
+        let stored_event_id = json_string_field(line, "event_id").ok_or_else(|| {
+            IndexEventHandlingError::Persistence(format!(
+                "malformed journal record in {} at line {}: missing or invalid event_id",
+                journal_path.display(),
+                line_number + 1
+            ))
+        })?;
+        let stored_operation_id = json_string_field(line, "operation_id").ok_or_else(|| {
+            IndexEventHandlingError::Persistence(format!(
+                "malformed journal record in {} at line {}: missing or invalid operation_id",
+                journal_path.display(),
+                line_number + 1
+            ))
+        })?;
+        let status = json_string_field(line, "status").ok_or_else(|| {
+            IndexEventHandlingError::Persistence(format!(
+                "malformed journal record in {} at line {}: missing or invalid status",
+                journal_path.display(),
+                line_number + 1
+            ))
+        })?;
 
-        if stored_event_id.is_none() || stored_operation_id.is_none() {
+        if stored_event_id != event_id {
             continue;
         }
 
-        let same_occurrence = stored_event_id.as_deref() == Some(event_id)
-            && stored_operation_id.as_deref() == Some(operation_id);
-
-        if !same_occurrence {
+        if stored_operation_id != operation_id {
             return Ok(ExistingOperationState::Conflict);
         }
 
         saw_matching_occurrence = true;
 
-        match json_field(line, "status").as_deref() {
-            Some(INDEX_ASSIGNMENT_STATUS_COMPLETED) => saw_completed = true,
-            Some(INDEX_ASSIGNMENT_STATUS_STARTED) => saw_started = true,
-            _ => {}
+        match status.as_str() {
+            INDEX_ASSIGNMENT_STATUS_COMPLETED => saw_completed = true,
+            INDEX_ASSIGNMENT_STATUS_STARTED => saw_started = true,
+            _ => {
+                return Err(IndexEventHandlingError::Persistence(format!(
+                    "malformed journal record in {} at line {}: unsupported status {}",
+                    journal_path.display(),
+                    line_number + 1,
+                    status
+                )));
+            }
         }
     }
 
@@ -858,48 +879,61 @@ fn existing_operation_state(
     }
 }
 
-/// Extracts one string field from the runtime's deliberately small JSONL
-/// journal format. The journal values written by this module are JSON-escaped;
-/// this parser therefore only decodes the escapes needed by identity fields.
-fn json_field(record: &str, field: &str) -> Option<String> {
+pub(crate) fn json_string_field(record: &str, field: &str) -> Option<String> {
     let prefix = format!("\"{field}\":\"");
     let start = record.find(&prefix)? + prefix.len();
-    let bytes = record.as_bytes();
+    let mut characters = record[start..].chars().peekable();
     let mut output = String::new();
-    let mut index = start;
 
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => return Some(output),
-            b'\\' => {
-                index += 1;
-                if index >= bytes.len() {
-                    return None;
-                }
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => return Some(output),
+            '\\' => {
+                let escaped = characters.next()?;
+                match escaped {
+                    '"' => output.push('"'),
+                    '\\' => output.push('\\'),
+                    '/' => output.push('/'),
+                    'b' => output.push('\u{0008}'),
+                    'f' => output.push('\u{000c}'),
+                    'n' => output.push('\n'),
+                    'r' => output.push('\r'),
+                    't' => output.push('\t'),
+                    'u' => {
+                        let mut hex = String::with_capacity(4);
+                        for _ in 0..4 {
+                            hex.push(characters.next()?);
+                        }
 
-                match bytes[index] {
-                    b'"' => output.push('"'),
-                    b'\\' => output.push('\\'),
-                    b'n' => output.push('\n'),
-                    b'r' => output.push('\r'),
-                    b't' => output.push('\t'),
-                    b'u' => {
-                        if index + 4 >= bytes.len() {
+                        let code = u16::from_str_radix(&hex, 16).ok()?;
+
+                        if (0xD800..=0xDBFF).contains(&code) {
+                            let mut lookahead = characters.clone();
+                            if lookahead.next() == Some('\\') && lookahead.next() == Some('u') {
+                                let mut low_hex = String::with_capacity(4);
+                                for _ in 0..4 {
+                                    low_hex.push(lookahead.next()?);
+                                }
+                                let low = u16::from_str_radix(&low_hex, 16).ok()?;
+                                if (0xDC00..=0xDFFF).contains(&low) {
+                                    let high = u32::from(code - 0xD800);
+                                    let low = u32::from(low - 0xDC00);
+                                    let scalar = 0x1_0000 + ((high << 10) | low);
+                                    output.push(char::from_u32(scalar)?);
+                                    characters = lookahead;
+                                    continue;
+                                }
+                            }
                             return None;
                         }
 
-                        let hex = std::str::from_utf8(&bytes[index + 1..index + 5]).ok()?;
-                        let code = u16::from_str_radix(hex, 16).ok()?;
-                        output.push(char::from_u32(code as u32)?);
-                        index += 4;
+                        output.push(char::from_u32(u32::from(code))?);
                     }
                     _ => return None,
                 }
             }
-            byte => output.push(byte as char),
+            other => output.push(other),
         }
-
-        index += 1;
     }
 
     None
@@ -918,12 +952,13 @@ struct OperationLock {
 }
 
 impl OperationLock {
-    fn acquire(operation_directory: &Path) -> Result<Self, bool> {
-        if fs::create_dir_all(operation_directory).is_err() {
+    fn acquire(operation_directory: &Path, event_id: &str) -> Result<Self, bool> {
+        let lock_directory = operation_directory.join("locks");
+        if fs::create_dir_all(&lock_directory).is_err() {
             return Err(true);
         }
 
-        let path = operation_directory.join("operation.lock");
+        let path = lock_directory.join(format!("event-{}.lock", hex_encode(event_id.as_bytes())));
 
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(_) => Ok(Self { path }),
@@ -944,15 +979,42 @@ const INDEX_ASSIGNMENT_STATUS_COMPLETED: &str = "completed";
 
 impl IndexingEngine {
     /// Creates a new Indexing Engine facade in the Core `Created` state.
+    ///
+    /// The default operation root is relative to the process working directory.
+    /// Applications that need a specific durable location should use
+    /// [`Self::new_with_operation_root`].
     #[must_use]
     pub fn new(engine_id: EngineId, engine_instance_id: EngineInstanceId) -> Self {
+        Self::new_with_operation_root(
+            engine_id,
+            engine_instance_id,
+            PathBuf::from(".nizaam").join("indexing"),
+        )
+    }
+
+    /// Creates a new Indexing Engine facade with an explicit durable operation
+    /// root.
+    #[must_use]
+    pub fn new_with_operation_root(
+        engine_id: EngineId,
+        engine_instance_id: EngineInstanceId,
+        operation_root: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             registration: IndexingRegistration::new(engine_id.clone(), engine_instance_id.clone()),
             runtime: IndexingRuntime::new(engine_id, engine_instance_id),
             capabilities: CapabilitySet::new(),
+            operation_root: operation_root.into(),
             engine_registered: AtomicBool::new(false),
             phase0_capability_registered: AtomicBool::new(false),
         }
+    }
+
+    /// Returns the configured root used for durable Index Assignment Operation
+    /// records.
+    #[must_use]
+    pub fn operation_root(&self) -> &Path {
+        &self.operation_root
     }
 
     /// Returns the logical engine identity shared by registration and runtime.
@@ -1216,7 +1278,7 @@ impl IndexingEngine {
             received_event.object_reference(),
         );
 
-        let root_directory = indexing_operation_directory()?;
+        let root_directory = indexing_operation_directory(self.operation_root())?;
         let operation_directory = index_assignment_operation_directory(&root_directory, &index_id);
         let journal_path = root_directory.join(format!(
             "index-assignment-{}.jsonl",
@@ -1234,10 +1296,16 @@ impl IndexingEngine {
             ExistingOperationState::Conflict => {
                 return Err(IndexEventHandlingError::OperationConflict { index_id });
             }
-            ExistingOperationState::Missing | ExistingOperationState::Started => {}
+            ExistingOperationState::Missing => {}
+            ExistingOperationState::Started => {
+                return Err(IndexEventHandlingError::OperationInProgress { index_id });
+            }
         }
 
-        let _operation_lock = match OperationLock::acquire(&operation_directory) {
+        let _operation_lock = match OperationLock::acquire(
+            &operation_directory,
+            received_event.event_id().as_str(),
+        ) {
             Ok(lock) => lock,
             Err(false) => {
                 return Err(IndexEventHandlingError::OperationInProgress { index_id });
@@ -1264,7 +1332,10 @@ impl IndexingEngine {
             ExistingOperationState::Conflict => {
                 return Err(IndexEventHandlingError::OperationConflict { index_id });
             }
-            ExistingOperationState::Missing | ExistingOperationState::Started => {}
+            ExistingOperationState::Missing => {}
+            ExistingOperationState::Started => {
+                return Err(IndexEventHandlingError::OperationInProgress { index_id });
+            }
         }
 
         // Persist the received event before executing the assignment. A crash
@@ -1752,13 +1823,101 @@ mod tests {
 
         assert_eq!(
             existing_operation_state(&journal, "event-2", "operation-1").unwrap(),
-            ExistingOperationState::Conflict
+            ExistingOperationState::Missing
         );
         assert_eq!(
             existing_operation_state(&journal, "event-1", "operation-2").unwrap(),
             ExistingOperationState::Conflict
         );
 
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn operation_journal_treats_different_events_as_independent_occurrences() {
+        let directory = std::env::temp_dir().join(format!(
+            "nizaam-indexing-runtime-independent-event-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let journal = directory.join("operation.jsonl");
+
+        std::fs::write(
+            &journal,
+            concat!(
+                "{\"event_id\":\"event-1\",\"operation_id\":\"operation-1\",\"status\":\"started\"}\n",
+                "{\"event_id\":\"event-2\",\"operation_id\":\"operation-2\",\"status\":\"started\"}\n"
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            existing_operation_state(&journal, "event-2", "operation-2").unwrap(),
+            ExistingOperationState::Started
+        );
+        assert_eq!(
+            existing_operation_state(&journal, "event-3", "operation-3").unwrap(),
+            ExistingOperationState::Missing
+        );
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn malformed_journal_record_blocks_duplicate_admission() {
+        let directory = std::env::temp_dir().join(format!(
+            "nizaam-indexing-runtime-malformed-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let journal = directory.join("operation.jsonl");
+
+        std::fs::write(&journal, "{\"event_id\":\"event-1\"\n").unwrap();
+
+        assert!(matches!(
+            existing_operation_state(&journal, "event-1", "operation-1"),
+            Err(IndexEventHandlingError::Persistence(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn json_string_field_round_trips_json_unicode_escapes() {
+        assert_eq!(
+            json_string_field(r#"{"value":"hello \u00e9 \u4f60\u597d"}"#, "value"),
+            Some("hello é 你好".to_owned())
+        );
+    }
+
+    #[test]
+    fn operation_lock_is_scoped_per_event() {
+        let directory = std::env::temp_dir().join(format!(
+            "nizaam-indexing-runtime-event-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let first = OperationLock::acquire(&directory, "event-1")
+            .expect("first event should claim its lock");
+        let second = OperationLock::acquire(&directory, "event-2")
+            .expect("second event should claim its own lock");
+        assert!(OperationLock::acquire(&directory, "event-1").is_err());
+
+        drop(second);
+        drop(first);
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -1774,12 +1933,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).unwrap();
 
-        let first =
-            OperationLock::acquire(&directory).expect("first operation should claim the lock");
-        assert!(OperationLock::acquire(&directory).is_err());
+        let first = OperationLock::acquire(&directory, "event-1")
+            .expect("first operation should claim the lock");
+        assert!(OperationLock::acquire(&directory, "event-1").is_err());
         drop(first);
 
-        assert!(OperationLock::acquire(&directory).is_ok());
+        assert!(OperationLock::acquire(&directory, "event-1").is_ok());
 
         let _ = std::fs::remove_dir_all(directory);
     }

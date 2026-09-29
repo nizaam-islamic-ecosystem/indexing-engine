@@ -39,6 +39,8 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::engine::runtime::json_string_field;
+
 /// A durable Index Assignment operation that was started but not completed.
 ///
 /// This is the recovery module's filesystem-facing descriptor. It contains
@@ -53,6 +55,7 @@ pub struct PersistedRecoveryOperation {
     operation_id: String,
     event_snapshot: PathBuf,
     response_snapshot: Option<PathBuf>,
+    operation_lock: PathBuf,
 }
 
 impl PersistedRecoveryOperation {
@@ -62,6 +65,7 @@ impl PersistedRecoveryOperation {
         operation_id: String,
         event_snapshot: PathBuf,
         response_snapshot: Option<PathBuf>,
+        operation_lock: PathBuf,
     ) -> Self {
         Self {
             index_id_hex,
@@ -69,6 +73,7 @@ impl PersistedRecoveryOperation {
             operation_id,
             event_snapshot,
             response_snapshot,
+            operation_lock,
         }
     }
 
@@ -100,6 +105,12 @@ impl PersistedRecoveryOperation {
     #[must_use]
     pub fn response_snapshot(&self) -> Option<&Path> {
         self.response_snapshot.as_deref()
+    }
+
+    /// Returns the event-scoped operation lock path.
+    #[must_use]
+    pub fn operation_lock(&self) -> &Path {
+        &self.operation_lock
     }
 }
 
@@ -246,16 +257,32 @@ fn scan_journal_for_incomplete_operation(
                 )
             })?;
 
-            let response_snapshot = started.response_snapshot.clone().or_else(|| {
-                occurrences[index + 1..]
-                    .iter()
-                    .find(|occurrence| {
-                        occurrence.event_id == started.event_id
-                            && occurrence.operation_id == started.operation_id
-                            && occurrence.response_snapshot.is_some()
-                    })
-                    .and_then(|occurrence| occurrence.response_snapshot.clone())
-            });
+            let response_snapshot = started
+                .response_snapshot
+                .clone()
+                .filter(|path| !path.as_os_str().is_empty())
+                .or_else(|| {
+                    let derived = journal_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(format!("index-assignment-{index_id_hex}"))
+                        .join("responses")
+                        .join(format!(
+                            "response-{}.snapshot",
+                            hex_encode(started.event_id.as_bytes())
+                        ));
+                    derived.exists().then_some(derived)
+                });
+
+            let operation_lock = journal_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(format!("index-assignment-{index_id_hex}"))
+                .join("locks")
+                .join(format!(
+                    "event-{}.lock",
+                    hex_encode(started.event_id.as_bytes())
+                ));
 
             return Ok(Some(PersistedRecoveryOperation::new(
                 index_id_hex.to_owned(),
@@ -263,6 +290,7 @@ fn scan_journal_for_incomplete_operation(
                 started.operation_id.clone(),
                 event_snapshot,
                 response_snapshot,
+                operation_lock,
             )));
         }
     }
@@ -270,35 +298,16 @@ fn scan_journal_for_incomplete_operation(
     Ok(None)
 }
 
-fn json_string_field(line: &str, field: &str) -> Option<String> {
-    let needle = format!("\"{field}\":\"");
-    let start = line.find(&needle)? + needle.len();
-    let remaining = &line[start..];
-    let mut escaped = false;
-    let mut value = String::new();
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
 
-    for character in remaining.chars() {
-        if escaped {
-            value.push(match character {
-                '"' => '"',
-                '\\' => '\\',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-            continue;
-        }
-
-        match character {
-            '\\' => escaped = true,
-            '"' => return Some(value),
-            other => value.push(other),
-        }
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
     }
 
-    None
+    output
 }
 
 /// Recovery action selected for an Indexing failure.
@@ -696,6 +705,22 @@ impl RecoveryExecutor {
         let operations = scan_incomplete_operations(root_directory)?;
 
         for operation in &operations {
+            if operation.operation_lock().exists() {
+                match fs::remove_file(operation.operation_lock()) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(RecoveryExecutionError::new(
+                            RecoveryAction::Rebuild,
+                            format!(
+                                "could not reconcile recovery lock {}: {error}",
+                                operation.operation_lock().display()
+                            ),
+                        ));
+                    }
+                }
+            }
+
             handler.recover_persisted_operation(operation)?;
         }
 
@@ -921,6 +946,38 @@ mod tests {
     }
 
     #[test]
+    fn scanner_derives_a_response_snapshot_saved_before_a_crash() {
+        let root = std::env::temp_dir().join(format!(
+            "nizaam-indexing-recovery-response-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX epoch")
+                .as_nanos()
+        ));
+        let operation_dir = root.join("index-assignment-abc");
+        let response_dir = operation_dir.join("responses");
+        fs::create_dir_all(&response_dir).unwrap();
+
+        fs::write(
+            root.join("index-assignment-abc.jsonl"),
+            "{\"event_id\":\"event-1\",\"operation_id\":\"operation-1\",\"event_snapshot\":\"event.snapshot\",\"response_snapshot\":\"\",\"status\":\"started\"}\n",
+        )
+        .unwrap();
+        let expected_response = response_dir.join("response-6576656e742d31.snapshot");
+        fs::write(&expected_response, "response").unwrap();
+
+        let operations = scan_incomplete_operations(&root).unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0].response_snapshot(),
+            Some(expected_response.as_path())
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn scanner_does_not_return_completed_operation() {
         let root = std::env::temp_dir().join(format!(
             "nizaam-indexing-recovery-complete-test-{}",
@@ -1031,6 +1088,14 @@ mod tests {
         )
         .expect("journal must be written");
 
+        let lock_path = root
+            .join("index-assignment-0033")
+            .join("locks")
+            .join(format!("event-{}.lock", hex_encode(b"event-3")));
+        std::fs::create_dir_all(lock_path.parent().expect("lock parent should exist"))
+            .expect("lock directory must be created");
+        std::fs::write(&lock_path, b"stale lock").expect("stale lock must be written");
+
         let mut handler = PersistedHandler {
             operations: Vec::new(),
         };
@@ -1041,6 +1106,10 @@ mod tests {
 
         assert_eq!(recovered.len(), 1);
         assert_eq!(handler.operations, vec!["operation-3".to_owned()]);
+        assert!(
+            !lock_path.exists(),
+            "recovery must reconcile the stale event lock"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

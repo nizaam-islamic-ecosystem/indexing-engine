@@ -855,16 +855,6 @@ mod tests {
     use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
     use crate::index::{ConsistencyRequirement, IndexFamily, KeyDefinition, TargetReferenceType};
 
-    fn definition_identity(seed: u8) -> crate::identity::IndexDefinitionIdentity {
-        crate::identity::IndexDefinitionIdentity::new(
-            crate::identity::IndexDefinitionId::new(format!("documents.v{seed:02x}"))
-                .expect("test definition ID should be valid"),
-            crate::identity::IndexNamespace::new("search.documents")
-                .expect("test namespace should be valid"),
-            IndexFamily::Inverted,
-        )
-    }
-
     fn version_id(value: &str) -> IndexVersionId {
         IndexVersionId::new(value).expect("test version ID should be valid")
     }
@@ -901,7 +891,7 @@ mod tests {
     fn candidate(uniqueness: Uniqueness, entries: Vec<IndexEntry>) -> BuildCandidate {
         let definition = definition(uniqueness);
         BuildCandidate::from_parts(
-            definition_identity(0x11),
+            definition.identity().clone(),
             definition,
             IndexVersion::with_metadata(
                 version_id("index-v1"),
@@ -1209,7 +1199,7 @@ mod tests {
         .expect("unconstrained test definition should be valid");
 
         let base = BuildCandidate::from_parts(
-            definition_identity(0x11),
+            definition.identity().clone(),
             definition,
             IndexVersion::with_metadata(
                 version_id("index-v1"),

@@ -500,15 +500,6 @@ mod tests {
         Uniqueness,
     };
 
-    fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
-        IndexDefinitionIdentity::new(
-            IndexDefinitionId::new(format!("documents.v{seed:02x}"))
-                .expect("definition ID should be valid"),
-            IndexNamespace::new("search.documents").expect("namespace should be valid"),
-            IndexFamily::Inverted,
-        )
-    }
-
     fn version_id(value: &str) -> IndexVersionId {
         IndexVersionId::new(value).expect("test version ID should be valid")
     }
@@ -535,9 +526,10 @@ mod tests {
     }
 
     fn candidate(uniqueness: Uniqueness, entries: Vec<IndexEntry>) -> BuildCandidate {
+        let definition = definition(uniqueness);
         BuildCandidate::from_parts(
-            definition_identity(0x11),
-            definition(uniqueness),
+            definition.identity().clone(),
+            definition,
             IndexVersion::with_metadata(
                 version_id("index-v1"),
                 Some(

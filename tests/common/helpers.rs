@@ -8,9 +8,12 @@
 //! Indexing values required by repository-level tests while leaving the actual
 //! behavior under test visible at the call site.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use nizaam_core::capability::{
@@ -26,7 +29,7 @@ use nizaam_core::operation::{Operation, OperationContext};
 use nizaam_core::status::Status;
 
 use nizaam_indexing::IndexingRegistration;
-use nizaam_indexing::engine::{EngineSetupError, IndexingEngine};
+use nizaam_indexing::engine::runtime::{EngineSetupError, IndexingEngine};
 
 /// Stable logical engine identity used by repository-level tests.
 pub const TEST_ENGINE_ID: &str = "nizaam.indexing.test";
@@ -39,6 +42,17 @@ pub const TEST_CONTRACT_ID: &str = "nizaam.indexing.test.contract";
 
 /// Default test capability identity for custom integration-test handlers.
 pub const TEST_CAPABILITY_ID: &str = "nizaam.indexing.test.capability";
+
+static TEST_OPERATION_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn test_operation_root() -> PathBuf {
+    let sequence = TEST_OPERATION_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "nizaam-indexing-test-{}-{}",
+        std::process::id(),
+        sequence
+    ))
+}
 
 /// Creates the standard logical Indexing engine identity for tests.
 #[must_use]
@@ -67,13 +81,17 @@ pub fn engine_instance_id(value: &str) -> EngineInstanceId {
 /// Creates a fresh Indexing Engine facade using the standard test identities.
 #[must_use]
 pub fn test_engine() -> IndexingEngine {
-    IndexingEngine::new(test_engine_id(), test_engine_instance_id())
+    IndexingEngine::new_with_operation_root(
+        test_engine_id(),
+        test_engine_instance_id(),
+        test_operation_root(),
+    )
 }
 
 /// Creates a fresh Indexing Engine facade using explicit test identities.
 #[must_use]
 pub fn engine(engine_id: EngineId, instance_id: EngineInstanceId) -> IndexingEngine {
-    IndexingEngine::new(engine_id, instance_id)
+    IndexingEngine::new_with_operation_root(engine_id, instance_id, test_operation_root())
 }
 
 /// Creates an empty Core-owned engine registry for a test.

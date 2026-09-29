@@ -4,7 +4,6 @@
 //! indexing subsystem. The family definitions live in [`family`] so this
 //! module remains focused on module declarations, public exports, and
 //! module-boundary tests.
-////!
 //! Phase 1 families:
 //! - [`IndexFamily::Identity`]
 //! - [`IndexFamily::Inverted`]

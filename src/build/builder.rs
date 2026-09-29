@@ -320,6 +320,16 @@ pub enum BuildError {
     /// Candidate/definition/source/schema compatibility failed.
     Versioning(VersioningError),
 
+    /// The caller-supplied logical definition identity does not match the
+    /// identity carried by the supplied [`IndexDefinition`].
+    DefinitionIdentityMismatch {
+        /// Logical identity supplied separately by the caller.
+        supplied: IndexDefinitionIdentity,
+
+        /// Logical identity carried by the supplied definition.
+        definition: IndexDefinitionIdentity,
+    },
+
     /// A unique definition contains the same logical key for more than one
     /// logical entry in the supplied snapshot.
     UniqueKeyConflict {
@@ -346,6 +356,14 @@ impl fmt::Display for BuildError {
             Self::Versioning(error) => {
                 write!(formatter, "candidate versioning validation failed: {error}")
             }
+            Self::DefinitionIdentityMismatch {
+                supplied,
+                definition,
+            } => write!(
+                formatter,
+                "build input definition identity {} does not match definition identity {}",
+                supplied, definition
+            ),
             Self::UniqueKeyConflict { position, key } => write!(
                 formatter,
                 "unique candidate key conflict at position {position}: {key:?}"
@@ -360,7 +378,7 @@ impl Error for BuildError {
             Self::InvalidEntry { error, .. } => Some(error),
             Self::InvalidVersion(error) => Some(error),
             Self::Versioning(error) => Some(error),
-            Self::UniqueKeyConflict { .. } => None,
+            Self::DefinitionIdentityMismatch { .. } | Self::UniqueKeyConflict { .. } => None,
         }
     }
 }
@@ -386,6 +404,18 @@ impl BuildError {
             Self::Versioning(error) => (
                 "INDEXING.BUILD.003",
                 format!("candidate versioning validation failed: {error}"),
+                None,
+                None,
+            ),
+            Self::DefinitionIdentityMismatch {
+                supplied,
+                definition,
+            } => (
+                "INDEXING.BUILD.005",
+                format!(
+                    "build input definition identity {} does not match definition identity {}",
+                    supplied, definition
+                ),
                 None,
                 None,
             ),
@@ -504,6 +534,13 @@ impl IndexBuilder {
     /// This method is deliberately reusable by later Phase 3 layers after a
     /// candidate has been transformed by update or rebuild operations.
     pub fn validate(candidate: &BuildCandidate) -> Result<(), BuildError> {
+        if candidate.definition_identity != *candidate.definition.identity() {
+            return Err(BuildError::DefinitionIdentityMismatch {
+                supplied: candidate.definition_identity.clone(),
+                definition: candidate.definition.identity().clone(),
+            });
+        }
+
         validate_candidate_compatibility(&candidate.version, &candidate.definition)
             .map_err(BuildError::Versioning)?;
 
@@ -613,12 +650,8 @@ mod tests {
         .expect("unique test definition should be valid")
     }
 
-    fn input(
-        definition_identity: IndexDefinitionIdentity,
-        version: &str,
-        definition: IndexDefinition,
-        snapshot: BuildSnapshot,
-    ) -> BuildInput {
+    fn input(version: &str, definition: IndexDefinition, snapshot: BuildSnapshot) -> BuildInput {
+        let definition_identity = definition.identity().clone();
         BuildInput::new(
             definition_identity,
             definition,
@@ -638,7 +671,6 @@ mod tests {
         let builder = IndexBuilder::new();
         let candidate = builder
             .build(input(
-                definition_identity("documents.v1", "search.documents", IndexFamily::Inverted),
                 "index-v4",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
@@ -665,7 +697,6 @@ mod tests {
 
         let candidate = IndexBuilder::new()
             .build(input(
-                definition_identity("documents.v2", "search.documents", IndexFamily::Inverted),
                 "index-v9",
                 definition(Some("source-v8"), Some("schema-v5")),
                 snapshot,
@@ -696,7 +727,6 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                definition_identity("documents.v31", "search.documents", IndexFamily::Inverted),
                 "index-unique",
                 definition_with_uniqueness(Uniqueness::Unique),
                 snapshot,
@@ -722,7 +752,6 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                definition_identity("documents.v33", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
@@ -745,7 +774,6 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                definition_identity("documents.v44", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
@@ -768,7 +796,6 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                definition_identity("documents.v55", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
@@ -782,17 +809,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_definition_identity_mismatch_before_versioning_checks() {
+        let definition = definition(None, None);
+        let supplied =
+            definition_identity("documents.other", "search.documents", IndexFamily::Inverted);
+
+        let error = IndexBuilder::new()
+            .build(BuildInput::new(
+                supplied.clone(),
+                definition.clone(),
+                version_id("index-mismatch"),
+                BuildSnapshot::new(Vec::<IndexEntry>::new()),
+            ))
+            .expect_err("a mismatched supplied identity must be rejected");
+
+        assert_eq!(
+            error,
+            BuildError::DefinitionIdentityMismatch {
+                supplied,
+                definition: definition.identity().clone(),
+            }
+        );
+    }
+
+    #[test]
     fn allows_an_empty_snapshot() {
         let snapshot = BuildSnapshot::new(Vec::<IndexEntry>::new());
         assert!(snapshot.is_empty());
 
         let candidate = IndexBuilder::new()
-            .build(input(
-                definition_identity("documents.v66", "search.documents", IndexFamily::Inverted),
-                "index-empty",
-                definition(None, None),
-                snapshot,
-            ))
+            .build(input("index-empty", definition(None, None), snapshot))
             .expect("an empty logical snapshot is still a valid candidate");
 
         assert!(candidate.is_empty());
@@ -807,12 +853,7 @@ mod tests {
         ]);
 
         let candidate = IndexBuilder::new()
-            .build(input(
-                definition_identity("documents.v77", "search.documents", IndexFamily::Inverted),
-                "index-order",
-                definition(None, None),
-                snapshot,
-            ))
+            .build(input("index-order", definition(None, None), snapshot))
             .expect("candidate should build");
 
         let references: Vec<&str> = candidate
@@ -825,18 +866,13 @@ mod tests {
     }
 
     #[test]
-    fn build_does_not_regenerate_or_replace_the_supplied_definition_identity() {
-        let supplied =
-            definition_identity("documents.v88", "search.documents", IndexFamily::Inverted);
+    fn build_preserves_the_definition_identity_from_the_supplied_definition() {
+        let definition = definition(None, None);
+        let supplied = definition.identity().clone();
         let snapshot = BuildSnapshot::new(Vec::<IndexEntry>::new());
 
         let candidate = IndexBuilder::new()
-            .build(input(
-                supplied.clone(),
-                "index-v1",
-                definition(None, None),
-                snapshot,
-            ))
+            .build(input("index-v1", definition, snapshot))
             .expect("candidate should build");
 
         assert_eq!(candidate.definition_identity(), &supplied);
@@ -851,12 +887,7 @@ mod tests {
         );
 
         let candidate = IndexBuilder::new()
-            .build(input(
-                definition_identity("documents.v99", "search.documents", IndexFamily::Inverted),
-                "index-v1",
-                definition(None, None),
-                snapshot,
-            ))
+            .build(input("index-v1", definition(None, None), snapshot))
             .expect("unconstrained definition should accept snapshot versions");
 
         assert_eq!(candidate.len(), 0);
@@ -866,7 +897,6 @@ mod tests {
     fn validation_is_repeatable_and_has_no_publication_effect() {
         let candidate = IndexBuilder::new()
             .build(input(
-                definition_identity("documents.vAA", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v1"), Some("schema-v1")),
                 BuildSnapshot::with_versions(
