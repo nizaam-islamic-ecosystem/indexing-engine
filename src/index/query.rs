@@ -1,14 +1,18 @@
-//! Backward-compatible Phase 2 query contracts for the Indexing Engine.
+//! Legacy Phase 2 query adapter for the Indexing Engine.
 //!
 //! Phase 4 moved the canonical logical query request/result contracts to
-//! [`crate::query`]. This legacy module deliberately keeps the original
-//! `QueryRequest` API intact for callers that still use `crate::index::query`
-//! (and the corresponding `crate::index`/crate-root re-exports).
+//! [`crate::query`]. This module preserves the `crate::index::query` module
+//! path and the legacy exact-query construction shape while delegating all
+//! query behavior to the canonical Phase 4 request/result types.
 //!
-//! The legacy request is a thin adapter over the canonical Phase 4 request:
-//! there is no second query implementation. The adapter preserves the original
-//! `query()` and `into_parts()` signatures while exposing the canonical request
-//! through `Deref`/conversion for newer code.
+//! The logical target is represented by [`IndexDefinitionIdentity`], matching
+//! the canonical query contract. `IndexId` is intentionally not used here:
+//! it identifies an Index Assignment Operation, not a logical query target.
+//!
+//! The legacy request remains a thin adapter over the canonical Phase 4
+//! request. There is no second query implementation. The adapter continues to
+//! expose `query()` and `into_parts()` for legacy callers while also exposing
+//! the canonical request through `Deref`/conversion.
 //!
 //! New Phase 4 query construction, planning, consistency, and retrieval types
 //! belong to [`crate::query`].
@@ -16,7 +20,7 @@
 use core::num::NonZeroUsize;
 use core::ops::Deref;
 
-use crate::identity::IndexId;
+use crate::identity::IndexDefinitionIdentity;
 use crate::index::KeyMaterial;
 use crate::query::QueryKind;
 
@@ -38,28 +42,36 @@ pub struct QueryRequest {
 
 impl QueryRequest {
     /// Constructs the original exact logical query request.
-    pub fn new(index_id: IndexId, query: KeyMaterial) -> Result<Self, QueryRequestValidationError> {
+    pub fn new(
+        definition_identity: IndexDefinitionIdentity,
+        query: KeyMaterial,
+    ) -> Result<Self, QueryRequestValidationError> {
         Ok(Self {
-            inner: crate::query::QueryRequest::new(index_id, query)?,
+            inner: crate::query::QueryRequest::new(definition_identity, query)?,
         })
     }
 
     /// Constructs the original exact logical request with optional limit and metadata.
     pub fn with_options(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         query: KeyMaterial,
         limit: Option<NonZeroUsize>,
         metadata: Option<KeyMaterial>,
     ) -> Result<Self, QueryRequestValidationError> {
         Ok(Self {
-            inner: crate::query::QueryRequest::with_options(index_id, query, limit, metadata)?,
+            inner: crate::query::QueryRequest::with_options(
+                definition_identity,
+                query,
+                limit,
+                metadata,
+            )?,
         })
     }
 
-    /// Returns the concrete logical index identity.
+    /// Returns the logical index definition identity.
     #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        self.inner.index_id()
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        self.inner.definition_identity()
     }
 
     /// Returns the original generic query material.
@@ -111,13 +123,13 @@ impl QueryRequest {
     pub fn into_parts(
         self,
     ) -> (
-        IndexId,
+        IndexDefinitionIdentity,
         KeyMaterial,
         Option<NonZeroUsize>,
         Option<KeyMaterial>,
     ) {
         let (
-            index_id,
+            definition_identity,
             _namespace,
             _definition_id,
             _family,
@@ -133,7 +145,7 @@ impl QueryRequest {
             _ => unreachable!("legacy QueryRequest can only contain an exact query"),
         };
 
-        (index_id, query, limit, metadata)
+        (definition_identity, query, limit, metadata)
     }
 }
 
@@ -160,12 +172,19 @@ impl AsRef<crate::query::QueryRequest> for QueryRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::index::INDEX_ID_BYTE_LEN;
-    use crate::index::{IndexVersion, IndexVersionId, KeyMaterial, ObjectReference, SourceVersion};
+    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
+    use crate::index::{
+        IndexFamily, IndexVersion, IndexVersionId, KeyMaterial, ObjectReference, SourceVersion,
+    };
     use core::num::NonZeroUsize;
 
-    fn index_id(byte: u8) -> crate::identity::IndexId {
-        crate::identity::IndexId::from_bytes([byte; INDEX_ID_BYTE_LEN])
+    fn definition_identity(byte: u8) -> IndexDefinitionIdentity {
+        let definition_id = IndexDefinitionId::new(format!("legacy-query-definition-{byte}"))
+            .expect("test definition ID must be valid");
+        let namespace = IndexNamespace::new(format!("legacy.query.namespace.{byte}"))
+            .expect("test namespace must be valid");
+
+        IndexDefinitionIdentity::new(definition_id, namespace, IndexFamily::Identity)
     }
 
     fn version(byte: u8) -> IndexVersion {
@@ -180,10 +199,10 @@ mod tests {
 
     #[test]
     fn valid_query_request_is_provider_neutral() {
-        let request = QueryRequest::new(index_id(0x11), KeyMaterial::text("bismillah"))
+        let request = QueryRequest::new(definition_identity(0x11), KeyMaterial::text("bismillah"))
             .expect("request should be valid");
 
-        assert_eq!(request.index_id().as_bytes(), &[0x11; INDEX_ID_BYTE_LEN]);
+        assert_eq!(request.definition_identity(), &definition_identity(0x11));
         assert_eq!(request.query(), &KeyMaterial::text("bismillah"));
         assert!(request.limit().is_none());
         assert!(request.metadata().is_none());
@@ -192,7 +211,7 @@ mod tests {
     #[test]
     fn query_request_supports_logical_limit_and_generic_metadata() {
         let request = QueryRequest::with_options(
-            index_id(0x22),
+            definition_identity(0x22),
             KeyMaterial::text("term"),
             NonZeroUsize::new(10),
             Some(KeyMaterial::text("caller-metadata")),
@@ -210,7 +229,7 @@ mod tests {
     fn query_request_rejects_invalid_query_material() {
         let invalid = KeyMaterial::Text("\u{0000}".to_owned());
 
-        let result = QueryRequest::new(index_id(0x33), invalid);
+        let result = QueryRequest::new(definition_identity(0x33), invalid);
 
         assert!(matches!(
             result,
@@ -220,7 +239,7 @@ mod tests {
 
     #[test]
     fn query_request_validation_is_repeatable() {
-        let request = QueryRequest::new(index_id(0x44), KeyMaterial::Unsigned(42))
+        let request = QueryRequest::new(definition_identity(0x44), KeyMaterial::Unsigned(42))
             .expect("request should be valid");
 
         assert_eq!(request.validate(), Ok(()));
@@ -266,10 +285,10 @@ mod tests {
     fn query_result_preserves_index_and_version() {
         let hit = QueryHit::new(reference());
 
-        let result = QueryResult::new(index_id(0x55), version(1), vec![hit])
+        let result = QueryResult::new(definition_identity(0x55), version(1), vec![hit])
             .expect("result should be valid");
 
-        assert_eq!(result.index_id().as_bytes(), &[0x55; INDEX_ID_BYTE_LEN]);
+        assert_eq!(result.definition_identity(), &definition_identity(0x55));
         assert_eq!(result.index_version().id().as_str(), "index-version-1");
         assert_eq!(result.hits().len(), 1);
         assert_eq!(result.hits()[0].reference().object_reference(), "verse:1:1");
@@ -280,7 +299,7 @@ mod tests {
     #[test]
     fn query_result_supports_opaque_continuation() {
         let result = QueryResult::with_continuation(
-            index_id(0x66),
+            definition_identity(0x66),
             version(2),
             vec![QueryHit::new(reference())],
             Some(vec![1, 2, 3, 4]),
@@ -293,7 +312,7 @@ mod tests {
 
     #[test]
     fn query_result_is_empty_hit_list_capable() {
-        let result = QueryResult::new(index_id(0x77), version(3), Vec::new())
+        let result = QueryResult::new(definition_identity(0x77), version(3), Vec::new())
             .expect("empty result should be valid");
 
         assert!(result.hits().is_empty());
@@ -301,8 +320,12 @@ mod tests {
 
     #[test]
     fn query_result_validation_checks_index_version() {
-        let result = QueryResult::new(index_id(0x88), version(4), vec![QueryHit::new(reference())])
-            .expect("result should be valid");
+        let result = QueryResult::new(
+            definition_identity(0x88),
+            version(4),
+            vec![QueryHit::new(reference())],
+        )
+        .expect("result should be valid");
 
         assert_eq!(result.validate(), Ok(()));
     }
@@ -322,8 +345,12 @@ mod tests {
 
     #[test]
     fn query_contract_contains_no_domain_object_type() {
-        let result = QueryResult::new(index_id(0x99), version(5), vec![QueryHit::new(reference())])
-            .expect("result should be valid");
+        let result = QueryResult::new(
+            definition_identity(0x99),
+            version(5),
+            vec![QueryHit::new(reference())],
+        )
+        .expect("result should be valid");
 
         // The only object-bearing value exposed by a hit is ObjectReference.
         assert_eq!(result.hits()[0].reference().source(), "quran");
@@ -332,16 +359,16 @@ mod tests {
     #[test]
     fn into_parts_preserves_query_request_contents() {
         let request = QueryRequest::with_options(
-            index_id(0xaa),
+            definition_identity(0xaa),
             KeyMaterial::text("query"),
             NonZeroUsize::new(5),
             Some(KeyMaterial::Bool(true)),
         )
         .expect("request should be valid");
 
-        let (returned_index_id, query, limit, metadata) = request.into_parts();
+        let (returned_definition_identity, query, limit, metadata) = request.into_parts();
 
-        assert_eq!(returned_index_id.as_bytes(), &[0xaa; INDEX_ID_BYTE_LEN]);
+        assert_eq!(returned_definition_identity, definition_identity(0xaa));
         assert_eq!(query, KeyMaterial::text("query"));
         assert_eq!(limit, NonZeroUsize::new(5));
         assert_eq!(metadata, Some(KeyMaterial::Bool(true)));
@@ -349,7 +376,7 @@ mod tests {
 
     #[test]
     fn legacy_request_can_be_borrowed_or_converted_as_canonical_phase4_request() {
-        let request = QueryRequest::new(index_id(0xbc), KeyMaterial::text("bridge"))
+        let request = QueryRequest::new(definition_identity(0xbc), KeyMaterial::text("bridge"))
             .expect("legacy request should be valid");
 
         assert!(matches!(
@@ -368,10 +395,10 @@ mod tests {
 
     #[test]
     fn legacy_paths_resolve_to_canonical_phase4_types() {
-        let request = QueryRequest::new(index_id(0xbb), KeyMaterial::text("canonical"))
+        let request = QueryRequest::new(definition_identity(0xbb), KeyMaterial::text("canonical"))
             .expect("request should be valid");
 
-        let result = QueryResult::new(index_id(0xbb), version(6), Vec::new())
+        let result = QueryResult::new(definition_identity(0xbb), version(6), Vec::new())
             .expect("result should be valid");
 
         let _: crate::query::QueryRequest = request.into();

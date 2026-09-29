@@ -403,6 +403,50 @@ mod tests {
     }
 
     #[test]
+    fn validation_error_display_is_stable() {
+        let zero_error = ConfigurationValidationError::ZeroValue {
+            field: ConfigurationField::MaxBatchSize,
+        };
+        assert_eq!(
+            zero_error.to_string(),
+            "max_batch_size must be greater than zero"
+        );
+
+        let budget_error = ConfigurationValidationError::OperationCapacityExceedsBudget {
+            max_operation_capacity_units: 33,
+            max_capacity_units: 32,
+        };
+        assert_eq!(
+            budget_error.to_string(),
+            "max operation capacity units (33) must not exceed max capacity units (32)"
+        );
+    }
+
+    #[test]
+    fn validation_error_payloads_preserve_the_invalid_values() {
+        let zero_result = IndexingConfiguration::new(0, 2, 2, 1, 16, 1_024, 128, 32);
+
+        assert_eq!(
+            zero_result,
+            Err(ConfigurationValidationError::ZeroValue {
+                field: ConfigurationField::MaxConcurrentQueries,
+            })
+        );
+
+        let budget_result = IndexingConfiguration::new(8, 2, 2, 1, 16, 1_024, 128, 129);
+
+        assert_eq!(
+            budget_result,
+            Err(
+                ConfigurationValidationError::OperationCapacityExceedsBudget {
+                    max_operation_capacity_units: 129,
+                    max_capacity_units: 128,
+                }
+            )
+        );
+    }
+
+    #[test]
     fn configuration_field_names_are_stable() {
         assert_eq!(
             ConfigurationField::MaxConcurrentQueries.as_str(),

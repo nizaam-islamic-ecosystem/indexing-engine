@@ -20,6 +20,10 @@
 //! logical indexing correctness does not depend on a second observability
 //! framework.
 
+use nizaam_indexing::engine::runtime::IndexingEngine;
+use nizaam_indexing::event::EntityType;
+use nizaam_indexing::identity::IndexAssignedId;
+
 mod common;
 
 use common::{
@@ -57,8 +61,8 @@ use nizaam_indexing::requirement::IndexRequirement;
 use nizaam_indexing::{
     CapacityAccounting, CapacityAdmissionError, CapacityOperation, CapacityRequest, FailureClass,
     IndexEvent, IndexEventResponse, IndexLifecycle, IndexLifecycleState, IndexingConfiguration,
-    IndexingEngine, IndexingRegistration, IndexingRuntime, IntegrityValidator, RecoveryAction,
-    RecoveryRequest, action_for, classify,
+    IndexingRegistration, IndexingRuntime, IntegrityValidator, RecoveryAction, RecoveryRequest,
+    action_for, classify,
 };
 
 fn core_shutdown_token(_: &nizaam_core::runtime::CancellationToken) {}
@@ -96,6 +100,16 @@ fn envelope(
 
 fn phase2_index_id(byte: u8) -> IndexId {
     IndexId::from_bytes([byte; 64])
+}
+
+fn phase2_definition_identity(byte: u8) -> IndexDefinitionIdentity {
+    IndexDefinitionIdentity::new(
+        IndexDefinitionId::new(format!("phase2.conformance.definition.{byte}"))
+            .expect("test definition ID must be valid"),
+        IndexNamespace::new(format!("phase2.conformance.{byte}"))
+            .expect("test namespace must be valid"),
+        IndexFamily::Identity,
+    )
 }
 
 fn phase2_namespace(value: &str) -> IndexNamespace {
@@ -719,8 +733,8 @@ fn phase2_versions_remain_separate_from_one_another_and_from_core_contract_versi
 
 #[test]
 fn phase2_query_contracts_are_reference_oriented_and_do_not_execute_queries() {
-    let index_id = phase2_index_id(0x55);
-    let query = Phase2QueryRequest::new(index_id, KeyMaterial::text("lookup"))
+    let definition_identity = phase2_definition_identity(0x55);
+    let query = Phase2QueryRequest::new(definition_identity.clone(), KeyMaterial::text("lookup"))
         .expect("query request should be valid");
 
     let reference = phase2_object_reference("source-q", "object-11");
@@ -728,7 +742,7 @@ fn phase2_query_contracts_are_reference_oriented_and_do_not_execute_queries() {
         .with_metrics(Some(0.91), None)
         .expect("query hit metrics should be valid");
     let result = QueryResult::new(
-        phase2_index_id(0x55),
+        definition_identity,
         phase2_index_version("index-v1"),
         vec![hit],
     )
@@ -767,11 +781,22 @@ fn phase3_entry(term: &str, object: &str) -> IndexEntry {
     .expect("phase3 entry should be valid")
 }
 
-fn phase3_candidate(seed: u8, version: &str, entries: Vec<IndexEntry>) -> BuildCandidate {
+fn phase3_candidate(version: &str, entries: Vec<IndexEntry>) -> BuildCandidate {
+    let definition = phase3_definition();
+    phase3_candidate_with_definition(version, definition, entries)
+}
+
+fn phase3_candidate_with_definition(
+    version: &str,
+    definition: IndexDefinition,
+    entries: Vec<IndexEntry>,
+) -> BuildCandidate {
+    let definition_identity = definition.identity().clone();
+
     IndexBuilder::new()
         .build(BuildInput::new(
-            phase2_index_id(seed),
-            phase3_definition(),
+            definition_identity,
+            definition,
             IndexVersionId::new(version).expect("phase3 version ID must be valid"),
             BuildSnapshot::with_versions(
                 Some(SourceVersion::new("source-v1").expect("source version must be valid")),
@@ -824,7 +849,7 @@ fn phase3_index_version_lifecycle_is_distinct_from_core_engine_lifecycle() {
 
 #[test]
 fn phase3_build_update_and_rebuild_boundaries_are_core_runtime_independent() {
-    let index = phase3_candidate(0xA1, "phase3-v1", vec![phase3_entry("base", "doc:0")]);
+    let index = phase3_candidate("phase3-v1", vec![phase3_entry("base", "doc:0")]);
     let updater = CandidateUpdater::new();
     let mut journal = UpdateJournal::new();
 
@@ -845,7 +870,7 @@ fn phase3_build_update_and_rebuild_boundaries_are_core_runtime_independent() {
     let progress = rebuilder
         .start(
             RebuildInput::new(
-                *updated.index_id(),
+                updated.definition_identity().clone(),
                 updated.definition().clone(),
                 IndexVersionId::new("phase3-v2").expect("candidate version ID must be valid"),
                 BuildSnapshot::with_versions(
@@ -870,11 +895,7 @@ fn phase3_build_update_and_rebuild_boundaries_are_core_runtime_independent() {
 
 #[test]
 fn phase3_failed_build_cannot_replace_or_mutate_an_existing_active_candidate() {
-    let active = phase3_candidate(
-        0xA2,
-        "phase3-active-v1",
-        vec![phase3_entry("active", "doc:0")],
-    );
+    let active = phase3_candidate("phase3-active-v1", vec![phase3_entry("active", "doc:0")]);
     let active_before = active.clone();
 
     let bad_snapshot = BuildSnapshot::with_versions(
@@ -885,7 +906,7 @@ fn phase3_failed_build_cannot_replace_or_mutate_an_existing_active_candidate() {
 
     let error = IndexBuilder::new()
         .build(BuildInput::new(
-            *active.index_id(),
+            active.definition_identity().clone(),
             phase3_definition(),
             IndexVersionId::new("phase3-invalid-v2").expect("candidate version ID must be valid"),
             bad_snapshot,
@@ -906,12 +927,8 @@ fn phase3_failed_build_cannot_replace_or_mutate_an_existing_active_candidate() {
 #[test]
 fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_identity() {
     let publisher = IndexPublisher::new();
-    let active_v1 = phase3_candidate(
-        0xA3,
-        "phase3-active-v1",
-        vec![phase3_entry("base", "doc:0")],
-    );
-    let candidate_v2 = phase3_candidate(0xA3, "phase3-v2", vec![phase3_entry("next", "doc:1")]);
+    let active_v1 = phase3_candidate("phase3-active-v1", vec![phase3_entry("base", "doc:0")]);
+    let candidate_v2 = phase3_candidate("phase3-v2", vec![phase3_entry("next", "doc:1")]);
     let candidate_v2_state = ready_state(&candidate_v2);
 
     let active_version = active_v1.version().id().clone();
@@ -940,9 +957,27 @@ fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_ide
         "phase3-active-v1"
     );
 
-    let mismatched_active =
-        phase3_candidate(0xA4, "phase3-v2", vec![phase3_entry("other", "doc:9")]);
-    let candidate_v3 = phase3_candidate(0xA3, "phase3-v3", vec![phase3_entry("v3", "doc:3")]);
+    let mismatched_definition = IndexDefinition::new(
+        IndexDefinitionIdentity::new(
+            phase2_definition_id("conformance.phase3.mismatched"),
+            phase2_namespace("conformance.phase3.mismatched"),
+            IndexFamily::Inverted,
+        ),
+        phase2_key_definition(),
+        phase2_target_reference_type(),
+        Uniqueness::NonUnique,
+        phase2_consistency(),
+        Some(SourceVersion::new("source-v1").expect("source version must be valid")),
+        Some(SchemaVersion::new("schema-v1").expect("schema version must be valid")),
+    )
+    .expect("mismatched definition should be valid");
+
+    let mismatched_active = phase3_candidate_with_definition(
+        "phase3-v2",
+        mismatched_definition,
+        vec![phase3_entry("other", "doc:9")],
+    );
+    let candidate_v3 = phase3_candidate("phase3-v3", vec![phase3_entry("v3", "doc:3")]);
     let candidate_v3_state = ready_state(&candidate_v3);
 
     let prepared_v3 = publisher
@@ -959,13 +994,16 @@ fn phase3_publication_preserves_previous_active_and_rejects_mismatched_index_ide
         .publish(prepared_v3, Some(mismatched_active), None)
         .expect_err("a different concrete index identity must be rejected");
 
-    assert!(matches!(error, PublicationError::IndexMismatch { .. }));
+    assert!(matches!(
+        error,
+        PublicationError::DefinitionIdentityMismatch { .. }
+    ));
     assert_eq!(published.active().version().id().as_str(), "phase3-v2");
 }
 
 #[test]
 fn phase3_batch_boundary_is_transactional_and_remains_provider_neutral() {
-    let base = phase3_candidate(0xA5, "phase3-batch-v1", vec![phase3_entry("base", "doc:0")]);
+    let base = phase3_candidate("phase3-batch-v1", vec![phase3_entry("base", "doc:0")]);
     let error = BatchExecutor::new()
         .execute(
             &base,
@@ -1008,7 +1046,6 @@ use nizaam_indexing::query::{
 };
 
 fn phase4_conformance_candidate(
-    seed: u8,
     definition_value: &str,
     version_value: &str,
     source_sequence: u64,
@@ -1057,7 +1094,11 @@ fn phase4_conformance_candidate(
     .expect("synchronization should be valid");
 
     IndexCandidate::new(
-        IndexId::from_bytes([seed; 64]),
+        IndexDefinitionIdentity::new(
+            definition.definition_id().clone(),
+            definition.namespace().clone(),
+            definition.family(),
+        ),
         definition,
         state,
         synchronization,
@@ -1198,7 +1239,11 @@ impl ProviderRetriever for ConformanceProvider {
 #[test]
 fn phase4_query_request_is_usable_without_core_runtime_objects() {
     let request = QueryRequest::with_spec(
-        phase2_index_id(0xa1),
+        IndexDefinitionIdentity::new(
+            phase2_definition_id("phase4.query"),
+            phase2_namespace("phase4.conformance"),
+            IndexFamily::Identity,
+        ),
         Some(phase2_namespace("phase4.conformance")),
         Some(phase2_definition_id("phase4.query")),
         Some(IndexFamily::Identity),
@@ -1219,15 +1264,17 @@ fn phase4_query_request_is_usable_without_core_runtime_objects() {
 #[test]
 fn phase4_planner_resolves_generic_provider_capabilities_not_core_routing() {
     let candidate = phase4_conformance_candidate(
-        0xa2,
         "phase4.planner",
         "published-v1",
         10,
         10,
         VersionLifecycle::Published,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
-        .expect("exact request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("key"),
+    )
+    .expect("exact request should be valid");
 
     let plan = plan_query(
         &request,
@@ -1247,15 +1294,17 @@ fn phase4_planner_resolves_generic_provider_capabilities_not_core_routing() {
 #[test]
 fn phase4_planner_consumes_caller_supplied_candidates_instead_of_creating_a_global_registry() {
     let first = phase4_conformance_candidate(
-        0xa3,
         "phase4.registry",
         "published-v1",
         11,
         11,
         VersionLifecycle::Published,
     );
-    let request = QueryRequest::exact(*first.index_id(), KeyMaterial::text("key"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        first.definition_identity().clone(),
+        KeyMaterial::text("key"),
+    )
+    .expect("request should be valid");
 
     let plan = plan_query(
         &request,
@@ -1268,8 +1317,8 @@ fn phase4_planner_consumes_caller_supplied_candidates_instead_of_creating_a_glob
     assert_eq!(
         plan.target()
             .expect("single-index target should exist")
-            .index_id(),
-        first.index_id()
+            .definition_identity(),
+        first.definition_identity()
     );
     assert_eq!(
         plan.target()
@@ -1284,15 +1333,17 @@ fn phase4_planner_consumes_caller_supplied_candidates_instead_of_creating_a_glob
 #[test]
 fn phase4_retrieval_forwards_the_existing_core_operation_context_unchanged() {
     let candidate = phase4_conformance_candidate(
-        0xa4,
         "phase4.context",
         "published-v1",
         12,
         12,
         VersionLifecycle::Published,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("key"),
+    )
+    .expect("request should be valid");
     let provider =
         ConformanceProvider::new(ProviderCapabilities::with(ProviderCapability::ExactLookup));
     let context = operation_context("phase4-conformance-context");
@@ -1312,15 +1363,17 @@ fn phase4_retrieval_forwards_the_existing_core_operation_context_unchanged() {
 #[test]
 fn phase4_retrieval_result_remains_reference_oriented() {
     let candidate = phase4_conformance_candidate(
-        0xa5,
         "phase4.result",
         "published-v1",
         13,
         13,
         VersionLifecycle::Published,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("key"),
+    )
+    .expect("request should be valid");
     let provider =
         ConformanceProvider::new(ProviderCapabilities::with(ProviderCapability::ExactLookup));
     let plan = plan_query(
@@ -1348,7 +1401,6 @@ fn phase4_retrieval_result_remains_reference_oriented() {
 #[test]
 fn phase4_neighborhood_query_keeps_source_relationship_meaning_opaque() {
     let candidate = phase4_conformance_candidate(
-        0xa6,
         "phase4.neighborhood",
         "published-v1",
         14,
@@ -1356,8 +1408,9 @@ fn phase4_neighborhood_query_keeps_source_relationship_meaning_opaque() {
         VersionLifecycle::Published,
     );
     let anchor = ObjectReference::new("source", "entity:42").expect("anchor should be valid");
-    let request = QueryRequest::neighborhood(*candidate.index_id(), anchor.clone())
-        .expect("neighborhood request should be valid");
+    let request =
+        QueryRequest::neighborhood(candidate.definition_identity().clone(), anchor.clone())
+            .expect("neighborhood request should be valid");
     let plan = plan_query(
         &request,
         vec![candidate],
@@ -1375,15 +1428,17 @@ fn phase4_neighborhood_query_keeps_source_relationship_meaning_opaque() {
 #[test]
 fn phase4_unpublished_versions_are_not_queryable_even_when_provider_capability_exists() {
     let candidate = phase4_conformance_candidate(
-        0xa7,
         "phase4.unpublished",
         "candidate-v1",
         15,
         15,
         VersionLifecycle::Ready,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("key"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("key"),
+    )
+    .expect("request should be valid");
 
     let error = plan_query(
         &request,
@@ -1402,7 +1457,6 @@ fn phase4_unpublished_versions_are_not_queryable_even_when_provider_capability_e
 #[test]
 fn phase4_hybrid_plans_do_not_hide_heterogeneous_target_provenance() {
     let first = phase4_conformance_candidate(
-        0xa8,
         "phase4.hybrid.a",
         "published-a",
         16,
@@ -1410,7 +1464,6 @@ fn phase4_hybrid_plans_do_not_hide_heterogeneous_target_provenance() {
         VersionLifecycle::Published,
     );
     let second = phase4_conformance_candidate(
-        0xa9,
         "phase4.hybrid.b",
         "published-b",
         16,
@@ -1418,7 +1471,7 @@ fn phase4_hybrid_plans_do_not_hide_heterogeneous_target_provenance() {
         VersionLifecycle::Published,
     );
     let component_a = HybridQueryComponent::with_options(
-        Some(*first.index_id()),
+        Some(first.definition_identity().clone()),
         AtomicQuery::Exact {
             key: KeyMaterial::text("a"),
         },
@@ -1426,15 +1479,18 @@ fn phase4_hybrid_plans_do_not_hide_heterogeneous_target_provenance() {
     )
     .expect("first hybrid component should be valid");
     let component_b = HybridQueryComponent::with_options(
-        Some(*second.index_id()),
+        Some(second.definition_identity().clone()),
         AtomicQuery::Exact {
             key: KeyMaterial::text("b"),
         },
         None,
     )
     .expect("second hybrid component should be valid");
-    let request = QueryRequest::hybrid(*first.index_id(), vec![component_a, component_b])
-        .expect("hybrid request should be valid");
+    let request = QueryRequest::hybrid(
+        first.definition_identity().clone(),
+        vec![component_a, component_b],
+    )
+    .expect("hybrid request should be valid");
     let provider = ConformanceProvider::new(ProviderCapabilities::with(
         ProviderCapability::HybridRetrieval,
     ));
@@ -1466,7 +1522,7 @@ fn phase4_hybrid_plans_do_not_hide_heterogeneous_target_provenance() {
 fn phase4_stale_allowed_policy_constraints_remain_indexing_owned() {
     let policy = FreshnessPolicy::new(2);
     let request = QueryRequest::with_spec(
-        phase2_index_id(0xaa),
+        phase2_definition_identity(0xaa),
         None,
         None,
         None,
@@ -1524,7 +1580,7 @@ fn phase6_control_plane_selection_does_not_execute_or_admit_indexing_work() {
 #[test]
 fn phase6_readiness_observation_does_not_mutate_index_or_engine_lifecycle() {
     let engine = test_engine();
-    let mut lifecycle = IndexLifecycle::new(phase2_index_id(0xc1));
+    let mut lifecycle = IndexLifecycle::new(phase2_definition_identity(0xc1));
 
     lifecycle
         .mark_building()
@@ -1556,7 +1612,6 @@ fn phase6_readiness_observation_does_not_mutate_index_or_engine_lifecycle() {
 #[test]
 fn phase6_logical_index_correctness_has_no_observability_dependency() {
     let candidate = phase3_candidate(
-        0xc2,
         "phase6-observability-independent-v1",
         vec![phase3_entry("opaque", "doc:1")],
     );
@@ -1578,7 +1633,7 @@ fn phase6_logical_index_correctness_has_no_observability_dependency() {
 #[test]
 fn phase5_index_lifecycle_is_local_and_does_not_control_core_runtime_lifecycle() {
     let engine = test_engine();
-    let mut lifecycle = IndexLifecycle::new(phase2_index_id(0xb1));
+    let mut lifecycle = IndexLifecycle::new(phase2_definition_identity(0xb1));
 
     assert_eq!(engine.runtime().state(), LifecycleState::Created);
     assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
@@ -1701,6 +1756,7 @@ fn phase5_index_event_reuses_core_identity_and_response_remains_indexing_content
 
     let event = IndexEvent::new(
         request,
+        EntityType::new("semantic").expect("entity type should be valid"),
         requirement,
         phase2_object_reference("source", "object:1"),
         KeyMaterial::text("term"),
@@ -1713,11 +1769,15 @@ fn phase5_index_event_reuses_core_identity_and_response_remains_indexing_content
     assert_eq!(event.source_engine_id().as_str(), "nizaam.source.phase5");
     assert_eq!(event.source_payload(), b"source-owned-payload");
 
+    let assigned_id =
+        IndexAssignedId::generate(&phase2_target_reference_type(), event.object_reference());
     let response = IndexEventResponse::with_version(
-        phase2_index_id(0xb2),
+        event.clone(),
+        assigned_id.clone(),
         IndexVersionId::new("phase5-response-v1").expect("version ID should be valid"),
     );
-    assert_eq!(response.index_id(), &phase2_index_id(0xb2));
+    assert_eq!(response.event(), &event);
+    assert_eq!(response.assigned_id(), &assigned_id);
     assert_eq!(
         response
             .version()

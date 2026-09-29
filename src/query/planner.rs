@@ -44,7 +44,7 @@ use core::num::NonZeroUsize;
 use super::request::{AtomicQuery, HybridQueryComponent, QueryKind, QueryRequest, ResultMode};
 use crate::consistency::policy::{ConsistencyEvaluation, ConsistencyMode, ConsistencyPolicyError};
 use crate::consistency::synchronization::SynchronizationSnapshot;
-use crate::identity::{IndexDefinitionId, IndexId, IndexNamespace};
+use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
 use crate::index::{
     IndexDefinition, IndexFamily, IndexVersion, IndexVersionState, KeyMaterial, ObjectReference,
     VersionLifecycle,
@@ -53,7 +53,7 @@ use crate::provider::{ProviderAvailability, ProviderCapabilities, ProviderCapabi
 
 /// A logical index/version candidate supplied to the query planner.
 ///
-/// The candidate associates a logical [`IndexId`] with one [`IndexDefinition`],
+/// The candidate associates a logical [`IndexDefinitionIdentity`] with one [`IndexDefinition`],
 /// one [`IndexVersionState`], and the query-time synchronization observations
 /// needed by the consistency subsystem.
 ///
@@ -62,7 +62,7 @@ use crate::provider::{ProviderAvailability, ProviderCapabilities, ProviderCapabi
 /// abstraction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexCandidate {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     definition: IndexDefinition,
     version: IndexVersionState,
     synchronization: SynchronizationSnapshot,
@@ -72,13 +72,13 @@ impl IndexCandidate {
     /// Creates a planner candidate from already-constructed logical contracts.
     #[must_use]
     pub fn new(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         definition: IndexDefinition,
         version: IndexVersionState,
         synchronization: SynchronizationSnapshot,
     ) -> Self {
         Self {
-            index_id,
+            definition_identity,
             definition,
             version,
             synchronization,
@@ -87,8 +87,8 @@ impl IndexCandidate {
 
     /// Returns the logical index identity associated with this candidate.
     #[must_use]
-    pub const fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub const fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the logical index definition.
@@ -120,6 +120,18 @@ impl IndexCandidate {
             .validate()
             .map_err(CandidateValidationError::InvalidVersion)?;
 
+        let definition_identity = IndexDefinitionIdentity::new(
+            self.definition.definition_id().clone(),
+            self.definition.namespace().clone(),
+            self.definition.family(),
+        );
+        if self.definition_identity != definition_identity {
+            return Err(CandidateValidationError::DefinitionIdentityMismatch {
+                supplied: self.definition_identity.clone(),
+                definition: definition_identity,
+            });
+        }
+
         self.synchronization
             .validate()
             .map_err(CandidateValidationError::InvalidSynchronization)?;
@@ -132,13 +144,13 @@ impl IndexCandidate {
     pub fn into_parts(
         self,
     ) -> (
-        IndexId,
+        IndexDefinitionIdentity,
         IndexDefinition,
         IndexVersionState,
         SynchronizationSnapshot,
     ) {
         (
-            self.index_id,
+            self.definition_identity,
             self.definition,
             self.version,
             self.synchronization,
@@ -155,6 +167,13 @@ pub enum CandidateValidationError {
     /// The logical index version is invalid.
     InvalidVersion(crate::index::IndexVersionValidationError),
 
+    /// The supplied definition identity does not match the identity components
+    /// carried by the candidate definition.
+    DefinitionIdentityMismatch {
+        supplied: IndexDefinitionIdentity,
+        definition: IndexDefinitionIdentity,
+    },
+
     /// The synchronization observation is invalid.
     InvalidSynchronization(crate::consistency::synchronization::SynchronizationError),
 }
@@ -166,6 +185,13 @@ impl fmt::Display for CandidateValidationError {
                 write!(formatter, "invalid index definition: {error}")
             }
             Self::InvalidVersion(error) => write!(formatter, "invalid index version: {error}"),
+            Self::DefinitionIdentityMismatch {
+                supplied,
+                definition,
+            } => write!(
+                formatter,
+                "candidate definition identity {supplied:?} does not match definition identity {definition:?}"
+            ),
             Self::InvalidSynchronization(error) => {
                 write!(formatter, "invalid synchronization observation: {error}")
             }
@@ -338,7 +364,7 @@ impl CapabilityResolution {
 /// One resolved logical index/version target inside a retrieval plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedIndex {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     definition: IndexDefinition,
     version: IndexVersion,
     lifecycle: VersionLifecycle,
@@ -348,7 +374,7 @@ pub struct PlannedIndex {
 impl PlannedIndex {
     fn from_candidate(candidate: &IndexCandidate, consistency: ConsistencyEvaluation) -> Self {
         Self {
-            index_id: candidate.index_id,
+            definition_identity: candidate.definition_identity().clone(),
             definition: candidate.definition.clone(),
             version: candidate.version.version().clone(),
             lifecycle: candidate.version.lifecycle(),
@@ -358,8 +384,8 @@ impl PlannedIndex {
 
     /// Returns the logical index identity selected for retrieval.
     #[must_use]
-    pub const fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub const fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the selected logical index definition.
@@ -804,12 +830,14 @@ pub enum QueryPlanningError {
     },
 
     /// No candidate exists for the requested logical index identifier.
-    NoIndexCandidate { index_id: IndexId },
+    NoDefinitionCandidate {
+        definition_identity: IndexDefinitionIdentity,
+    },
 
     /// Candidates exist for the requested index, but the optional logical
     /// namespace/definition/family selectors do not match any of them.
     SelectionHintsMismatch {
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         namespace: Option<IndexNamespace>,
         definition_id: Option<IndexDefinitionId>,
         family: Option<IndexFamily>,
@@ -825,14 +853,14 @@ pub enum QueryPlanningError {
 
     /// Consistency evaluation failed for every otherwise-eligible candidate.
     ConsistencyUnsatisfied {
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         last_error: ConsistencyPolicyError,
     },
 
     /// More than one candidate represented the exact same pinned logical
     /// version for one target index.
     AmbiguousPinnedVersion {
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         version_id: crate::index::IndexVersionId,
     },
 
@@ -840,7 +868,7 @@ pub enum QueryPlanningError {
     /// planner does not own an active-version registry, it cannot safely infer
     /// which zero-lag published candidate is the active one.
     AmbiguousCurrentVersion {
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         candidate_count: usize,
     },
 
@@ -857,7 +885,10 @@ pub enum QueryPlanningError {
     },
 
     /// A hybrid request contained a component target that does not exist.
-    HybridTargetMissing { position: usize, index_id: IndexId },
+    HybridTargetMissing {
+        position: usize,
+        definition_identity: IndexDefinitionIdentity,
+    },
 }
 
 impl fmt::Display for QueryPlanningError {
@@ -870,20 +901,22 @@ impl fmt::Display for QueryPlanningError {
                     "invalid planner candidate at position {position}: {error}"
                 )
             }
-            Self::NoIndexCandidate { index_id } => {
+            Self::NoDefinitionCandidate {
+                definition_identity,
+            } => {
                 write!(
                     formatter,
-                    "no planner candidate exists for logical index {index_id:?}"
+                    "no planner candidate exists for logical index definition {definition_identity:?}"
                 )
             }
             Self::SelectionHintsMismatch {
-                index_id,
+                definition_identity,
                 namespace,
                 definition_id,
                 family,
             } => write!(
                 formatter,
-                "logical selection hints do not match index {index_id:?}: namespace={namespace:?}, definition_id={definition_id:?}, family={family:?}"
+                "logical selection hints do not match index definition {definition_identity:?}: namespace={namespace:?}, definition_id={definition_id:?}, family={family:?}"
             ),
             Self::ProviderUnavailable { availability } => {
                 write!(formatter, "provider is {availability}")
@@ -895,27 +928,27 @@ impl fmt::Display for QueryPlanningError {
                 )
             }
             Self::ConsistencyUnsatisfied {
-                index_id,
+                definition_identity,
                 last_error,
             } => {
                 write!(
                     formatter,
-                    "consistency requirement cannot be satisfied for index {index_id:?}: {last_error}"
+                    "consistency requirement cannot be satisfied for index definition {definition_identity:?}: {last_error}"
                 )
             }
             Self::AmbiguousPinnedVersion {
-                index_id,
+                definition_identity,
                 version_id,
             } => write!(
                 formatter,
-                "multiple candidates expose the pinned version {version_id:?} for index {index_id:?}"
+                "multiple candidates expose the pinned version {version_id:?} for index definition {definition_identity:?}"
             ),
             Self::AmbiguousCurrentVersion {
-                index_id,
+                definition_identity,
                 candidate_count,
             } => write!(
                 formatter,
-                "multiple queryable candidates ({candidate_count}) satisfy current consistency for index {index_id:?}; the planner does not own active-version state"
+                "multiple queryable candidates ({candidate_count}) satisfy current consistency for index definition {definition_identity:?}; the planner does not own active-version state"
             ),
             Self::CapabilityRequirement(error) => {
                 write!(formatter, "invalid query capability requirement: {error}")
@@ -926,10 +959,13 @@ impl fmt::Display for QueryPlanningError {
                     "invalid hybrid component at position {position}: {source}"
                 )
             }
-            Self::HybridTargetMissing { position, index_id } => {
+            Self::HybridTargetMissing {
+                position,
+                definition_identity,
+            } => {
                 write!(
                     formatter,
-                    "hybrid component {position} targets missing index {index_id:?}"
+                    "hybrid component {position} targets missing index definition {definition_identity:?}"
                 )
             }
         }
@@ -990,7 +1026,7 @@ where
         }
         query => {
             let target = select_candidate(
-                request.index_id(),
+                request.definition_identity(),
                 request.namespace(),
                 request.definition_id(),
                 request.family(),
@@ -1011,7 +1047,7 @@ fn build_single_plan(
 ) -> Result<RetrievalPlan, QueryPlanningError> {
     let consistency = evaluate_candidate(candidate, request.consistency()).map_err(|error| {
         QueryPlanningError::ConsistencyUnsatisfied {
-            index_id: *candidate.index_id(),
+            definition_identity: candidate.definition_identity().clone(),
             last_error: error,
         }
     })?;
@@ -1074,16 +1110,16 @@ fn plan_hybrid(
     let mut planned = Vec::with_capacity(components.len());
 
     for (position, component) in components.iter().enumerate() {
-        let target_index_id = component
-            .target_index_id()
+        let target_definition_identity = component
+            .target_definition_identity()
             .cloned()
-            .unwrap_or_else(|| *request.index_id());
+            .unwrap_or_else(|| request.definition_identity().clone());
 
         let candidate = find_candidate_for_hybrid_component(
             position,
-            target_index_id,
+            target_definition_identity,
             request,
-            component.target_index_id().is_none(),
+            component.target_definition_identity().is_none(),
             candidates,
         )?;
 
@@ -1092,7 +1128,7 @@ fn plan_hybrid(
                 QueryPlanningError::InvalidHybridComponent {
                     position,
                     source: Box::new(QueryPlanningError::ConsistencyUnsatisfied {
-                        index_id: *candidate.index_id(),
+                        definition_identity: candidate.definition_identity().clone(),
                         last_error: error,
                     }),
                 }
@@ -1120,20 +1156,20 @@ fn plan_hybrid(
 
 fn find_candidate_for_hybrid_component<'a>(
     position: usize,
-    target_index_id: IndexId,
+    target_definition_identity: IndexDefinitionIdentity,
     request: &QueryRequest,
     uses_parent_target: bool,
     candidates: &'a [IndexCandidate],
 ) -> Result<&'a IndexCandidate, QueryPlanningError> {
     let target_candidates: Vec<&IndexCandidate> = candidates
         .iter()
-        .filter(|candidate| *candidate.index_id() == target_index_id)
+        .filter(|candidate| candidate.definition_identity() == &target_definition_identity)
         .collect();
 
     if target_candidates.is_empty() {
         return Err(QueryPlanningError::HybridTargetMissing {
             position,
-            index_id: target_index_id,
+            definition_identity: target_definition_identity,
         });
     }
 
@@ -1150,7 +1186,7 @@ fn find_candidate_for_hybrid_component<'a>(
         return Err(QueryPlanningError::InvalidHybridComponent {
             position,
             source: Box::new(QueryPlanningError::SelectionHintsMismatch {
-                index_id: target_index_id,
+                definition_identity: target_definition_identity,
                 namespace: request.namespace().cloned(),
                 definition_id: request.definition_id().cloned(),
                 family: request.family(),
@@ -1162,7 +1198,7 @@ fn find_candidate_for_hybrid_component<'a>(
 }
 
 fn select_candidate<'a>(
-    index_id: &IndexId,
+    definition_identity: &IndexDefinitionIdentity,
     namespace: Option<&IndexNamespace>,
     definition_id: Option<&IndexDefinitionId>,
     family: Option<IndexFamily>,
@@ -1171,12 +1207,12 @@ fn select_candidate<'a>(
 ) -> Result<&'a IndexCandidate, QueryPlanningError> {
     let matching_index: Vec<&IndexCandidate> = candidates
         .iter()
-        .filter(|candidate| candidate.index_id() == index_id)
+        .filter(|candidate| candidate.definition_identity() == definition_identity)
         .collect();
 
     if matching_index.is_empty() {
-        return Err(QueryPlanningError::NoIndexCandidate {
-            index_id: *index_id,
+        return Err(QueryPlanningError::NoDefinitionCandidate {
+            definition_identity: definition_identity.clone(),
         });
     }
 
@@ -1187,7 +1223,7 @@ fn select_candidate<'a>(
 
     if matching_hints.is_empty() {
         return Err(QueryPlanningError::SelectionHintsMismatch {
-            index_id: *index_id,
+            definition_identity: definition_identity.clone(),
             namespace: namespace.cloned(),
             definition_id: definition_id.cloned(),
             family,
@@ -1216,7 +1252,7 @@ fn select_from_matching_candidates<'a>(
             .first()
             .expect("candidate selection requires a non-empty candidate slice");
         return Err(QueryPlanningError::ConsistencyUnsatisfied {
-            index_id: *first.index_id(),
+            definition_identity: first.definition_identity().clone(),
             last_error: last_error.expect("rejected candidates must produce a consistency error"),
         });
     }
@@ -1224,7 +1260,7 @@ fn select_from_matching_candidates<'a>(
     if let ConsistencyMode::VersionPinned(requested) = consistency {
         if accepted.len() > 1 {
             return Err(QueryPlanningError::AmbiguousPinnedVersion {
-                index_id: *accepted[0].0.index_id(),
+                definition_identity: accepted[0].0.definition_identity().clone(),
                 version_id: requested.clone(),
             });
         }
@@ -1235,7 +1271,7 @@ fn select_from_matching_candidates<'a>(
     if matches!(consistency, ConsistencyMode::Current) {
         if accepted.len() > 1 {
             return Err(QueryPlanningError::AmbiguousCurrentVersion {
-                index_id: *accepted[0].0.index_id(),
+                definition_identity: accepted[0].0.definition_identity().clone(),
                 candidate_count: accepted.len(),
             });
         }
@@ -1359,14 +1395,12 @@ mod tests {
         IndexDefinitionId::new(value).expect("test definition ID should be valid")
     }
 
-    fn index_id(seed: u8, definition: &IndexDefinition) -> IndexId {
-        IndexId::generate(
-            definition.namespace(),
-            definition.definition_id(),
+    fn definition_identity(_seed: u8, definition: &IndexDefinition) -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            definition.definition_id().clone(),
+            definition.namespace().clone(),
             definition.family(),
-            &KeyMaterial::Unsigned(u128::from(seed)),
         )
-        .expect("test index ID should be generated")
     }
 
     fn definition(
@@ -1426,7 +1460,7 @@ mod tests {
         indexed_sequence: u64,
     ) -> IndexCandidate {
         let definition = definition("planner.level2", definition_value, family);
-        let id = index_id(seed, &definition);
+        let id = definition_identity(seed, &definition);
         let sync = SynchronizationSnapshot::from_sequences(
             crate::build::UpdateSequence::new(source_sequence),
             crate::build::UpdateSequence::new(indexed_sequence),
@@ -1458,8 +1492,11 @@ mod tests {
             10,
             10,
         );
-        let request = QueryRequest::exact(*selected.index_id(), KeyMaterial::text("lookup"))
-            .expect("exact request should be valid");
+        let request = QueryRequest::exact(
+            selected.definition_identity().clone(),
+            KeyMaterial::text("lookup"),
+        )
+        .expect("exact request should be valid");
 
         let plan = plan_query(
             &request,
@@ -1500,7 +1537,7 @@ mod tests {
             20,
         );
         let request = QueryRequest::with_spec(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             Some(namespace("planner.level2")),
             Some(definition_id("selector-definition")),
             Some(IndexFamily::Inverted),
@@ -1531,7 +1568,7 @@ mod tests {
         );
 
         let wrong = QueryRequest::with_spec(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             Some(namespace("planner.level2")),
             Some(definition_id("different-definition")),
             Some(IndexFamily::Inverted),
@@ -1563,7 +1600,7 @@ mod tests {
     #[test]
     fn current_consistency_selects_the_zero_lag_published_candidate() {
         let definition = definition("planner.level2", "current-selection", IndexFamily::Inverted);
-        let shared_index_id = index_id(3, &definition);
+        let shared_definition_identity = definition_identity(3, &definition);
         let stale_sync = SynchronizationSnapshot::from_sequences(
             crate::build::UpdateSequence::new(30),
             crate::build::UpdateSequence::new(28),
@@ -1575,19 +1612,19 @@ mod tests {
         )
         .expect("current synchronization should be valid");
         let stale = IndexCandidate::new(
-            shared_index_id,
+            shared_definition_identity.clone(),
             definition.clone(),
             published_version("published-v1"),
             stale_sync,
         );
         let current = IndexCandidate::new(
-            shared_index_id,
+            shared_definition_identity.clone(),
             definition,
             published_version("published-v2"),
             current_sync,
         );
         let request = QueryRequest::with_query(
-            shared_index_id,
+            shared_definition_identity.clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("current"),
                 parameters: None,
@@ -1621,10 +1658,10 @@ mod tests {
     #[test]
     fn current_consistency_rejects_ambiguous_zero_lag_candidates_without_active_registry() {
         let definition = definition("planner.level2", "current-ambiguous", IndexFamily::Inverted);
-        let shared_index_id = index_id(4, &definition);
+        let shared_definition_identity = definition_identity(4, &definition);
 
         let first = IndexCandidate::new(
-            shared_index_id,
+            shared_definition_identity.clone(),
             definition.clone(),
             published_version("published-v1"),
             SynchronizationSnapshot::from_sequences(
@@ -1635,7 +1672,7 @@ mod tests {
         );
 
         let second = IndexCandidate::new(
-            shared_index_id,
+            shared_definition_identity.clone(),
             definition,
             published_version("published-v2"),
             SynchronizationSnapshot::from_sequences(
@@ -1646,7 +1683,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query(
-            shared_index_id,
+            shared_definition_identity.clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("ambiguous-current"),
                 parameters: None,
@@ -1681,8 +1718,11 @@ mod tests {
             40,
             38,
         );
-        let request = QueryRequest::text(*selected.index_id(), KeyMaterial::text("lagged"))
-            .expect("text request should be valid");
+        let request = QueryRequest::text(
+            selected.definition_identity().clone(),
+            KeyMaterial::text("lagged"),
+        )
+        .expect("text request should be valid");
 
         let error = plan_query(
             &request,
@@ -1706,7 +1746,7 @@ mod tests {
         let pinned = candidate(6, "pinned-v7", IndexFamily::Inverted, "v7", 50, 48);
         let other = candidate(7, "other-v8", IndexFamily::Inverted, "v8", 50, 50);
         let request = QueryRequest::with_query_options(
-            *pinned.index_id(),
+            pinned.definition_identity().clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("pinned"),
                 parameters: None,
@@ -1747,7 +1787,7 @@ mod tests {
     fn pinned_consistency_does_not_fallback_to_another_version() {
         let selected = candidate(8, "available-v8", IndexFamily::Inverted, "v8", 60, 60);
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("pinned"),
                 parameters: None,
@@ -1790,7 +1830,7 @@ mod tests {
             .expect("synchronization should be valid")
             .with_time_lag(Duration::from_secs(2));
             IndexCandidate::new(
-                index_id(9, &definition),
+                definition_identity(9, &definition),
                 definition,
                 published_version("stale-v1"),
                 sync,
@@ -1798,7 +1838,7 @@ mod tests {
         };
 
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("stale"),
                 parameters: None,
@@ -1845,7 +1885,7 @@ mod tests {
             "candidate-definition",
             IndexFamily::Inverted,
         );
-        let id = index_id(10, &definition);
+        let id = definition_identity(10, &definition);
         let sync = SynchronizationSnapshot::from_sequences(
             crate::build::UpdateSequence::new(80),
             crate::build::UpdateSequence::new(80),
@@ -1859,13 +1899,13 @@ mod tests {
         ready.mark_ready().expect("candidate should become ready");
 
         let candidate = IndexCandidate::new(
-            *candidate.index_id(),
+            candidate.definition_identity().clone(),
             candidate.definition.clone(),
             ready,
             candidate.synchronization.clone(),
         );
         let request = QueryRequest::exact(
-            candidate.index_id().to_owned(),
+            candidate.definition_identity().to_owned(),
             KeyMaterial::text("candidate"),
         )
         .expect("exact request should be valid");
@@ -1900,9 +1940,11 @@ mod tests {
             90,
             90,
         );
-        let request =
-            QueryRequest::similarity(*selected.index_id(), KeyMaterial::bytes([1_u8, 2_u8, 3_u8]))
-                .expect("similarity request should be valid");
+        let request = QueryRequest::similarity(
+            selected.definition_identity().clone(),
+            KeyMaterial::bytes([1_u8, 2_u8, 3_u8]),
+        )
+        .expect("similarity request should be valid");
 
         let capabilities = ProviderCapabilities::with(ProviderCapability::SimilarityLookup);
         let error = plan_query(
@@ -1947,7 +1989,7 @@ mod tests {
             95,
         );
         let request = QueryRequest::filtered(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             AtomicQuery::Similarity {
                 representation: KeyMaterial::bytes([4_u8, 5_u8]),
                 parameters: None,
@@ -2004,9 +2046,11 @@ mod tests {
         })
         .expect("similarity component should be valid");
 
-        let request =
-            QueryRequest::hybrid(*first.index_id(), vec![first_component, second_component])
-                .expect("hybrid request should be valid");
+        let request = QueryRequest::hybrid(
+            first.definition_identity().clone(),
+            vec![first_component, second_component],
+        )
+        .expect("hybrid request should be valid");
 
         let plan = plan_query(
             &request,
@@ -2057,9 +2101,11 @@ mod tests {
         })
         .expect("exact component should be valid");
 
-        let request =
-            QueryRequest::hybrid(*first.index_id(), vec![first_component, second_component])
-                .expect("hybrid request should be valid");
+        let request = QueryRequest::hybrid(
+            first.definition_identity().clone(),
+            vec![first_component, second_component],
+        )
+        .expect("hybrid request should be valid");
 
         let capabilities = ProviderCapabilities::new()
             .with_capability(ProviderCapability::TextLookup)
@@ -2110,7 +2156,7 @@ mod tests {
             ),
         )
         .expect("filtered hybrid component should be valid");
-        let request = QueryRequest::hybrid(*selected.index_id(), vec![component])
+        let request = QueryRequest::hybrid(selected.definition_identity().clone(), vec![component])
             .expect_err("one component is invalid by the request contract");
         assert!(matches!(
             request,
@@ -2143,7 +2189,7 @@ mod tests {
         })
         .expect("first component should be valid");
         let filtered_component = HybridQueryComponent::with_options(
-            Some(*second.index_id()),
+            Some(second.definition_identity().clone()),
             AtomicQuery::Exact {
                 key: KeyMaterial::text("book"),
             },
@@ -2151,9 +2197,11 @@ mod tests {
         )
         .expect("filtered component should be valid");
 
-        let request =
-            QueryRequest::hybrid(*first.index_id(), vec![first_component, filtered_component])
-                .expect("two-component hybrid request should be valid");
+        let request = QueryRequest::hybrid(
+            first.definition_identity().clone(),
+            vec![first_component, filtered_component],
+        )
+        .expect("two-component hybrid request should be valid");
 
         let capabilities = ProviderCapabilities::with(ProviderCapability::TextLookup)
             .with_capability(ProviderCapability::FilteredLookup);
@@ -2184,8 +2232,11 @@ mod tests {
     #[test]
     fn provider_unavailability_is_distinguished_from_missing_capability() {
         let selected = candidate(19, "availability", IndexFamily::Identity, "v1", 130, 130);
-        let request = QueryRequest::exact(*selected.index_id(), KeyMaterial::text("x"))
-            .expect("exact request should be valid");
+        let request = QueryRequest::exact(
+            selected.definition_identity().clone(),
+            KeyMaterial::text("x"),
+        )
+        .expect("exact request should be valid");
 
         let unavailable = plan_query(
             &request,
@@ -2217,9 +2268,9 @@ mod tests {
     #[test]
     fn stale_allowed_selects_the_lowest_observed_update_lag_without_using_domain_semantics() {
         let definition = definition("planner.level2", "stale-selection", IndexFamily::Inverted);
-        let shared_index_id = index_id(20, &definition);
+        let shared_definition_identity = definition_identity(20, &definition);
         let one_lag = IndexCandidate::new(
-            shared_index_id,
+            shared_definition_identity.clone(),
             definition.clone(),
             published_version("z-version"),
             SynchronizationSnapshot::from_sequences(
@@ -2229,7 +2280,7 @@ mod tests {
             .expect("one-lag synchronization should be valid"),
         );
         let two_lag = IndexCandidate::new(
-            shared_index_id,
+            shared_definition_identity.clone(),
             definition,
             published_version("a-version"),
             SynchronizationSnapshot::from_sequences(
@@ -2240,7 +2291,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query_options(
-            shared_index_id,
+            shared_definition_identity.clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("meaning-free"),
                 parameters: None,
@@ -2279,13 +2330,13 @@ mod tests {
     fn duplicate_pinned_candidates_are_not_silently_chosen() {
         let first = candidate(22, "duplicate-a", IndexFamily::Inverted, "v7", 160, 160);
         let duplicate = IndexCandidate::new(
-            *first.index_id(),
+            first.definition_identity().clone(),
             first.definition().clone(),
             first.version().clone(),
             first.synchronization().clone(),
         );
         let request = QueryRequest::with_query_options(
-            *first.index_id(),
+            first.definition_identity().clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("duplicate"),
                 parameters: None,
@@ -2317,7 +2368,7 @@ mod tests {
     fn plan_preserves_limit_result_mode_and_request_metadata_without_reinterpreting_them() {
         let selected = candidate(24, "metadata-plan", IndexFamily::Inverted, "v1", 180, 180);
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("opaque-query"),
                 parameters: Some(KeyMaterial::Unsigned(7)),
@@ -2368,9 +2419,11 @@ mod tests {
             170,
             170,
         );
-        let request =
-            QueryRequest::similarity(*selected.index_id(), KeyMaterial::bytes([9_u8, 8_u8]))
-                .expect("similarity request should be valid");
+        let request = QueryRequest::similarity(
+            selected.definition_identity().clone(),
+            KeyMaterial::bytes([9_u8, 8_u8]),
+        )
+        .expect("similarity request should be valid");
 
         let plan = plan_query(
             &request,

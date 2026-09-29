@@ -36,7 +36,7 @@ use super::rebuild::RebuildResult;
 use super::update::{UpdateJournal, UpdateSequence};
 use crate::consistency::versioning::{VersioningError, validate_publication_eligibility};
 use crate::error::IndexingResult;
-use crate::identity::IndexId;
+use crate::identity::IndexDefinitionIdentity;
 use crate::index::{IndexDefinition, IndexVersionId, IndexVersionState, VersionLifecycle};
 use core::fmt;
 use nizaam_core::contracts::Version as CoreVersion;
@@ -186,9 +186,9 @@ pub enum PublicationError {
 
     /// The candidate and currently active candidate belong to different
     /// logical index resources.
-    IndexMismatch {
-        candidate_index: IndexId,
-        active_index: IndexId,
+    DefinitionIdentityMismatch {
+        candidate_identity: IndexDefinitionIdentity,
+        active_identity: IndexDefinitionIdentity,
     },
 
     /// The active version changed after preparation and before publication.
@@ -235,12 +235,12 @@ impl fmt::Display for PublicationError {
                     "publication versioning validation failed: {error}"
                 )
             }
-            Self::IndexMismatch {
-                candidate_index,
-                active_index,
+            Self::DefinitionIdentityMismatch {
+                candidate_identity,
+                active_identity,
             } => write!(
                 formatter,
-                "publication index mismatch: candidate index {candidate_index:?} differs from active index {active_index:?}"
+                "publication index mismatch: candidate index {candidate_identity:?} differs from active index {active_identity:?}"
             ),
             Self::ActiveVersionChanged { observed, current } => write!(
                 formatter,
@@ -276,7 +276,7 @@ impl Error for PublicationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Versioning(error) => Some(error),
-            Self::IndexMismatch { .. }
+            Self::DefinitionIdentityMismatch { .. }
             | Self::ActiveVersionChanged { .. }
             | Self::CandidateNotReady { .. }
             | Self::CandidateStateMismatch { .. }
@@ -298,18 +298,18 @@ impl PublicationError {
                 format!("publication versioning validation failed: {error}"),
                 Vec::new(),
             ),
-            Self::IndexMismatch {
-                candidate_index,
-                active_index,
+            Self::DefinitionIdentityMismatch {
+                candidate_identity,
+                active_identity,
             } => (
                 "INDEXING.PUBLICATION.002",
                 ErrorClass::Contract,
                 format!(
-                    "publication index mismatch: candidate index {candidate_index:?} differs from active index {active_index:?}"
+                    "publication index mismatch: candidate index {candidate_identity:?} differs from active index {active_identity:?}"
                 ),
                 vec![
-                    ("candidate_index", format!("{candidate_index:?}")),
-                    ("active_index", format!("{active_index:?}")),
+                    ("candidate_identity", format!("{candidate_identity:?}")),
+                    ("active_identity", format!("{active_identity:?}")),
                 ],
             ),
             Self::ActiveVersionChanged { observed, current } => (
@@ -543,10 +543,10 @@ impl IndexPublisher {
         }
 
         if let Some(active) = current_active.as_ref() {
-            if prepared.candidate().index_id() != active.index_id() {
-                return Err(PublicationError::IndexMismatch {
-                    candidate_index: *prepared.candidate().index_id(),
-                    active_index: *active.index_id(),
+            if prepared.candidate().definition_identity() != active.definition_identity() {
+                return Err(PublicationError::DefinitionIdentityMismatch {
+                    candidate_identity: prepared.candidate().definition_identity().clone(),
+                    active_identity: active.definition_identity().clone(),
                 });
             }
 
@@ -658,21 +658,30 @@ mod tests {
     use nizaam_core::identity::{CorrelationId, OperationId};
     use nizaam_core::operation::{Operation, OperationContext};
 
-    fn index_id() -> IndexId {
-        IndexId::from_bytes([0x11; 64])
+    fn definition_identity() -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            IndexDefinitionId::new("test.publication").expect("definition ID should be valid"),
+            IndexNamespace::new("test").expect("namespace should be valid"),
+            IndexFamily::Inverted,
+        )
+    }
+
+    fn alternate_definition_identity() -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            IndexDefinitionId::new("test.publication.other")
+                .expect("definition ID should be valid"),
+            IndexNamespace::new("test").expect("namespace should be valid"),
+            IndexFamily::Inverted,
+        )
     }
 
     fn version_id(value: &str) -> IndexVersionId {
         IndexVersionId::new(value).expect("test version ID should be valid")
     }
 
-    fn definition() -> IndexDefinition {
+    fn definition_for(identity: IndexDefinitionIdentity) -> IndexDefinition {
         IndexDefinition::new(
-            IndexDefinitionIdentity::new(
-                IndexDefinitionId::new("test.publication").expect("definition ID should be valid"),
-                IndexNamespace::new("test").expect("namespace should be valid"),
-                IndexFamily::Inverted,
-            ),
+            identity,
             KeyDefinition::new(["text"]).expect("key definition should be valid"),
             TargetReferenceType::new("object").expect("target reference type should be valid"),
             Uniqueness::NonUnique,
@@ -684,10 +693,17 @@ mod tests {
         .expect("definition should be valid")
     }
 
-    fn test_candidate(index_id: IndexId, version: &str) -> BuildCandidate {
+    fn definition() -> IndexDefinition {
+        definition_for(definition_identity())
+    }
+
+    fn test_candidate(
+        definition_identity: IndexDefinitionIdentity,
+        version: &str,
+    ) -> BuildCandidate {
         let input = BuildInput::new(
-            index_id,
-            definition(),
+            definition_identity.clone(),
+            definition_for(definition_identity),
             version_id(version),
             BuildSnapshot::new(std::iter::empty()),
         );
@@ -718,7 +734,7 @@ mod tests {
     #[test]
     fn prepare_valid_initial_candidate() {
         let publisher = IndexPublisher::new();
-        let candidate = test_candidate(index_id(), "v1");
+        let candidate = test_candidate(definition_identity(), "v1");
 
         let prepared = publisher
             .prepare(
@@ -738,7 +754,7 @@ mod tests {
     #[test]
     fn prepare_rejects_candidate_that_is_not_ready() {
         let publisher = IndexPublisher::new();
-        let candidate = test_candidate(index_id(), "v1");
+        let candidate = test_candidate(definition_identity(), "v1");
         let state = IndexVersionState::new(candidate.version().clone());
 
         let error = publisher
@@ -757,8 +773,8 @@ mod tests {
     #[test]
     fn prepare_rejects_state_for_a_different_version() {
         let publisher = IndexPublisher::new();
-        let candidate = test_candidate(index_id(), "v2");
-        let other_candidate = test_candidate(index_id(), "v1");
+        let candidate = test_candidate(definition_identity(), "v2");
+        let other_candidate = test_candidate(definition_identity(), "v1");
         let state = ready_state(&other_candidate);
 
         let error = publisher
@@ -780,7 +796,7 @@ mod tests {
     #[test]
     fn prepare_rejects_stale_candidate() {
         let publisher = IndexPublisher::new();
-        let candidate = test_candidate(index_id(), "v2");
+        let candidate = test_candidate(definition_identity(), "v2");
 
         let candidate_state = ready_state(&candidate);
         let error = publisher
@@ -802,8 +818,8 @@ mod tests {
     #[test]
     fn publish_preserves_previous_active_candidate() {
         let publisher = IndexPublisher::new();
-        let previous = test_candidate(index_id(), "v1");
-        let next = test_candidate(index_id(), "v2");
+        let previous = test_candidate(definition_identity(), "v1");
+        let next = test_candidate(definition_identity(), "v2");
         let next_state = ready_state(&next);
         let prepared = publisher
             .prepare(
@@ -827,7 +843,7 @@ mod tests {
     #[test]
     fn publish_rejects_changed_active_version() {
         let publisher = IndexPublisher::new();
-        let candidate = test_candidate(index_id(), "v3");
+        let candidate = test_candidate(definition_identity(), "v3");
         let candidate_state = ready_state(&candidate);
         let prepared = publisher
             .prepare(
@@ -838,7 +854,7 @@ mod tests {
                 Some(version_id("v1")),
             )
             .expect("candidate should prepare against v1");
-        let current_active = test_candidate(index_id(), "v2");
+        let current_active = test_candidate(definition_identity(), "v2");
 
         let error = publisher
             .publish(prepared, Some(current_active), None)
@@ -854,11 +870,11 @@ mod tests {
     }
 
     #[test]
-    fn publish_rejects_different_index_resource() {
+    fn publish_rejects_different_definition_identity() {
         let publisher = IndexPublisher::new();
-        let first = index_id();
-        let second = IndexId::from_bytes([0x22; 64]);
-        let candidate = test_candidate(first, "v2");
+        let first = definition_identity();
+        let second = alternate_definition_identity();
+        let candidate = test_candidate(first.clone(), "v2");
         let candidate_state = ready_state(&candidate);
         let prepared = publisher
             .prepare(
@@ -869,17 +885,17 @@ mod tests {
                 Some(version_id("v1")),
             )
             .expect("candidate should prepare");
-        let active_candidate = test_candidate(second, "v1");
+        let active_candidate = test_candidate(second.clone(), "v1");
 
         let error = publisher
             .publish(prepared, Some(active_candidate), None)
-            .expect_err("different logical indexes must not publish together");
+            .expect_err("different logical definition identities must not publish together");
 
         assert_eq!(
             error,
-            PublicationError::IndexMismatch {
-                candidate_index: first,
-                active_index: second,
+            PublicationError::DefinitionIdentityMismatch {
+                candidate_identity: first,
+                active_identity: second,
             }
         );
     }
@@ -891,7 +907,7 @@ mod tests {
         let rebuilt = rebuilder
             .rebuild(
                 RebuildInput::new(
-                    index_id(),
+                    definition_identity(),
                     definition(),
                     version_id("v2"),
                     BuildSnapshot::new(std::iter::empty()),
@@ -922,7 +938,7 @@ mod tests {
             ))
             .expect("journal advance should succeed");
 
-        let current_active = test_candidate(index_id(), "v1");
+        let current_active = test_candidate(definition_identity(), "v1");
         let error = IndexPublisher::new()
             .publish(prepared, Some(current_active), Some(&journal))
             .expect_err("publication must reject a journal advance after rebuild");
@@ -939,7 +955,7 @@ mod tests {
     #[test]
     fn successful_publication_result_is_core_adaptable() {
         let publisher = IndexPublisher::new();
-        let candidate = test_candidate(index_id(), "v1");
+        let candidate = test_candidate(definition_identity(), "v1");
         let candidate_state = ready_state(&candidate);
         let prepared = publisher
             .prepare(candidate, candidate_state, &definition(), None, None)

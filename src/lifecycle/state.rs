@@ -43,7 +43,7 @@
 //! Those concerns belong to the Phase 5 integrity, recovery, capacity, and
 //! Core runtime/health boundaries respectively.
 
-use crate::identity::IndexId;
+use crate::identity::IndexDefinitionIdentity;
 use core::fmt;
 use std::error::Error;
 
@@ -158,24 +158,24 @@ impl IndexLifecycleState {
 /// state, recovery policy, or Core engine lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexLifecycle {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     state: IndexLifecycleState,
 }
 
 impl IndexLifecycle {
     /// Creates a lifecycle value for an index in the initial `Creating` state.
     #[must_use]
-    pub const fn new(index_id: IndexId) -> Self {
+    pub fn new(definition_identity: IndexDefinitionIdentity) -> Self {
         Self {
-            index_id,
+            definition_identity,
             state: IndexLifecycleState::Creating,
         }
     }
 
-    /// Returns the logical index identity owned by this lifecycle value.
+    /// Returns the logical index definition identity owned by this lifecycle value.
     #[must_use]
-    pub const fn index_id(&self) -> IndexId {
-        self.index_id
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the current index lifecycle state.
@@ -208,7 +208,7 @@ impl IndexLifecycle {
         let current = self.state;
         if !current.can_transition_to(next) {
             return Err(IndexLifecycleTransitionError::new(
-                self.index_id,
+                self.definition_identity.clone(),
                 current,
                 next,
             ));
@@ -257,17 +257,17 @@ impl IndexLifecycle {
         self.transition_to(IndexLifecycleState::Retired)
     }
 
-    /// Consumes the lifecycle value and returns `(index_id, state)`.
+    /// Consumes the lifecycle value and returns `(definition_identity, state)`.
     #[must_use]
-    pub const fn into_parts(self) -> (IndexId, IndexLifecycleState) {
-        (self.index_id, self.state)
+    pub fn into_parts(self) -> (IndexDefinitionIdentity, IndexLifecycleState) {
+        (self.definition_identity, self.state)
     }
 }
 
 /// Error returned when an index lifecycle transition is not permitted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexLifecycleTransitionError {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     from: IndexLifecycleState,
     to: IndexLifecycleState,
 }
@@ -275,14 +275,22 @@ pub struct IndexLifecycleTransitionError {
 impl IndexLifecycleTransitionError {
     /// Creates a lifecycle transition error.
     #[must_use]
-    const fn new(index_id: IndexId, from: IndexLifecycleState, to: IndexLifecycleState) -> Self {
-        Self { index_id, from, to }
+    fn new(
+        definition_identity: IndexDefinitionIdentity,
+        from: IndexLifecycleState,
+        to: IndexLifecycleState,
+    ) -> Self {
+        Self {
+            definition_identity,
+            from,
+            to,
+        }
     }
 
-    /// Returns the affected logical index identity.
+    /// Returns the affected logical index definition identity.
     #[must_use]
-    pub const fn index_id(&self) -> IndexId {
-        self.index_id
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the lifecycle state from which the transition was attempted.
@@ -302,8 +310,8 @@ impl fmt::Display for IndexLifecycleTransitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "invalid lifecycle transition for index {:?}: {:?} → {:?}",
-            self.index_id, self.from, self.to
+            "invalid lifecycle transition for index definition {:?}: {:?} → {:?}",
+            self.definition_identity, self.from, self.to
         )
     }
 }
@@ -314,15 +322,25 @@ impl Error for IndexLifecycleTransitionError {}
 mod tests {
     use super::*;
 
-    fn index_id(byte: u8) -> IndexId {
-        IndexId::from_bytes([byte; crate::identity::INDEX_ID_BYTE_LEN])
+    fn definition_identity(byte: u8) -> IndexDefinitionIdentity {
+        let definition_id =
+            crate::identity::IndexDefinitionId::new(format!("lifecycle-definition-{byte}"))
+                .expect("test definition ID must be valid");
+        let namespace = crate::identity::IndexNamespace::new(format!("lifecycle.namespace.{byte}"))
+            .expect("test namespace must be valid");
+
+        IndexDefinitionIdentity::new(
+            definition_id,
+            namespace,
+            crate::index::IndexFamily::Identity,
+        )
     }
 
     #[test]
     fn new_index_starts_in_creating() {
-        let lifecycle = IndexLifecycle::new(index_id(0x11));
+        let lifecycle = IndexLifecycle::new(definition_identity(0x11));
 
-        assert_eq!(lifecycle.index_id(), index_id(0x11));
+        assert_eq!(lifecycle.definition_identity(), &definition_identity(0x11));
         assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
         assert!(!lifecycle.is_active());
         assert!(!lifecycle.is_terminal());
@@ -330,7 +348,7 @@ mod tests {
 
     #[test]
     fn happy_path_reaches_retired_through_all_primary_states() {
-        let mut lifecycle = IndexLifecycle::new(index_id(0x22));
+        let mut lifecycle = IndexLifecycle::new(definition_identity(0x22));
 
         lifecycle
             .mark_building()
@@ -406,7 +424,7 @@ mod tests {
             IndexLifecycleState::Validating,
             IndexLifecycleState::Ready,
         ] {
-            let mut lifecycle = IndexLifecycle::new(index_id(0x33));
+            let mut lifecycle = IndexLifecycle::new(definition_identity(0x33));
 
             advance_to(&mut lifecycle, state)
                 .unwrap_or_else(|error| panic!("cannot reach {state:?}: {error}"));
@@ -424,7 +442,7 @@ mod tests {
 
     #[test]
     fn maintaining_can_return_to_active() {
-        let mut lifecycle = IndexLifecycle::new(index_id(0x44));
+        let mut lifecycle = IndexLifecycle::new(definition_identity(0x44));
         lifecycle
             .mark_building()
             .expect("Creating → Building should work");
@@ -447,7 +465,7 @@ mod tests {
 
     #[test]
     fn same_state_transition_is_a_no_op() {
-        let mut lifecycle = IndexLifecycle::new(index_id(0x55));
+        let mut lifecycle = IndexLifecycle::new(definition_identity(0x55));
 
         for state in IndexLifecycleState::all() {
             lifecycle
@@ -462,7 +480,7 @@ mod tests {
 
     #[test]
     fn retired_is_terminal() {
-        let mut lifecycle = IndexLifecycle::new(index_id(0x66));
+        let mut lifecycle = IndexLifecycle::new(definition_identity(0x66));
         lifecycle
             .transition_to(IndexLifecycleState::Retiring)
             .expect("Creating → Retiring should work");
@@ -611,14 +629,14 @@ mod tests {
 
     #[test]
     fn transition_errors_preserve_identity_and_states() {
-        let id = index_id(0x77);
-        let mut lifecycle = IndexLifecycle::new(id);
+        let id = definition_identity(0x77);
+        let mut lifecycle = IndexLifecycle::new(id.clone());
 
         let error = lifecycle
             .transition_to(IndexLifecycleState::Active)
             .expect_err("Creating must not bypass the lifecycle boundary");
 
-        assert_eq!(error.index_id(), id);
+        assert_eq!(error.definition_identity(), &id);
         assert_eq!(error.from(), IndexLifecycleState::Creating);
         assert_eq!(error.to(), IndexLifecycleState::Active);
         assert!(error.to_string().contains("invalid lifecycle transition"));
@@ -627,8 +645,8 @@ mod tests {
 
     #[test]
     fn into_parts_preserves_identity_and_state() {
-        let id = index_id(0x88);
-        let mut lifecycle = IndexLifecycle::new(id);
+        let id = definition_identity(0x88);
+        let mut lifecycle = IndexLifecycle::new(id.clone());
         lifecycle
             .mark_building()
             .expect("Creating → Building should work");
@@ -636,9 +654,9 @@ mod tests {
             .mark_validating()
             .expect("Building → Validating should work");
 
-        let (returned_id, state) = lifecycle.into_parts();
+        let (returned_identity, state) = lifecycle.into_parts();
 
-        assert_eq!(returned_id, id);
+        assert_eq!(returned_identity, id);
         assert_eq!(state, IndexLifecycleState::Validating);
     }
 }

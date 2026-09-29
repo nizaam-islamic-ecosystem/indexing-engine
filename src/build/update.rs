@@ -666,7 +666,7 @@ impl CandidateUpdater {
         .map_err(|error| UpdateError::Build(BuildError::InvalidVersion(error)))?;
 
         let candidate = BuildCandidate::from_parts(
-            *base.index_id(),
+            base.definition_identity().clone(),
             base.definition().clone(),
             version,
             base.entries().to_vec(),
@@ -711,7 +711,7 @@ impl CandidateUpdater {
         }
 
         let updated = BuildCandidate::from_parts(
-            *candidate.index_id(),
+            candidate.definition_identity().clone(),
             candidate.definition().clone(),
             candidate.version().clone(),
             entries,
@@ -855,10 +855,6 @@ mod tests {
     use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
     use crate::index::{ConsistencyRequirement, IndexFamily, KeyDefinition, TargetReferenceType};
 
-    fn index_id(seed: u8) -> crate::identity::IndexId {
-        crate::identity::IndexId::from_bytes([seed; 64])
-    }
-
     fn version_id(value: &str) -> IndexVersionId {
         IndexVersionId::new(value).expect("test version ID should be valid")
     }
@@ -895,7 +891,7 @@ mod tests {
     fn candidate(uniqueness: Uniqueness, entries: Vec<IndexEntry>) -> BuildCandidate {
         let definition = definition(uniqueness);
         BuildCandidate::from_parts(
-            index_id(0x11),
+            definition.identity().clone(),
             definition,
             IndexVersion::with_metadata(
                 version_id("index-v1"),
@@ -1203,7 +1199,7 @@ mod tests {
         .expect("unconstrained test definition should be valid");
 
         let base = BuildCandidate::from_parts(
-            index_id(0x11),
+            definition.identity().clone(),
             definition,
             IndexVersion::with_metadata(
                 version_id("index-v1"),

@@ -493,16 +493,12 @@ impl BatchExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace};
+    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
     use crate::index::{
         ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion,
         IndexVersionId, KeyDefinition, KeyMaterial, ObjectReference, TargetReferenceType,
         Uniqueness,
     };
-
-    fn index_id(seed: u8) -> IndexId {
-        IndexId::from_bytes([seed; 64])
-    }
 
     fn version_id(value: &str) -> IndexVersionId {
         IndexVersionId::new(value).expect("test version ID should be valid")
@@ -530,9 +526,10 @@ mod tests {
     }
 
     fn candidate(uniqueness: Uniqueness, entries: Vec<IndexEntry>) -> BuildCandidate {
+        let definition = definition(uniqueness);
         BuildCandidate::from_parts(
-            index_id(0x11),
-            definition(uniqueness),
+            definition.identity().clone(),
+            definition,
             IndexVersion::with_metadata(
                 version_id("index-v1"),
                 Some(

@@ -1,9 +1,9 @@
 //! Typed Indexing response contract for the Phase 5 event boundary.
 //!
-//! The response is intentionally an Indexing-owned result value, not a second
-//! response protocol. Its primary success value is the logical [`IndexId`].
-//! Optional logical version metadata and bounded Indexing technical-result
-//! information may accompany that identifier.
+//! The response preserves the accepted [`IndexEvent`] and adds the
+//! [`IndexAssignedId`] produced by the Indexing Engine. This makes the
+//! successful result explicit without mutating Core's `UniversalRequest` or
+//! reinterpreting the source-owned payload.
 //!
 //! The surrounding Core capability/request infrastructure remains responsible
 //! for the `UniversalResponse` envelope, response interaction, message/event
@@ -12,31 +12,31 @@
 
 use core::fmt;
 
-use crate::identity::IndexId;
+use crate::event::IndexEvent;
+use crate::identity::IndexAssignedId;
 use crate::index::IndexVersionId;
 
 /// Typed result carried by an Indexing capability response.
 ///
-/// This is the Indexing-owned content that the surrounding Core capability
-/// layer places inside its existing [`nizaam_core::contracts::UniversalResponse`]
-/// boundary. It does not create a second response envelope or correlation
-/// mechanism.
+/// The response contains the same logical event accepted by Indexing plus the
+/// identity assigned to the referenced source object. Core identities and
+/// transport semantics remain outside this value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexEventResponse {
-    index_id: IndexId,
+    event: IndexEvent,
+    assigned_id: IndexAssignedId,
     version: Option<IndexVersionId>,
     technical_result: Option<String>,
 }
 
 impl IndexEventResponse {
-    /// Creates a successful response for an assigned logical index.
-    ///
-    /// The returned identifier is an Indexing logical identifier. It is not a
-    /// physical provider/storage identifier.
+    /// Creates a successful response containing the accepted event and its
+    /// Indexing-assigned entity identity.
     #[must_use]
-    pub fn new(index_id: IndexId) -> Self {
+    pub fn new(event: IndexEvent, assigned_id: IndexAssignedId) -> Self {
         Self {
-            index_id,
+            event,
+            assigned_id,
             version: None,
             technical_result: None,
         }
@@ -44,9 +44,14 @@ impl IndexEventResponse {
 
     /// Creates a response with optional logical version metadata.
     #[must_use]
-    pub fn with_version(index_id: IndexId, version: IndexVersionId) -> Self {
+    pub fn with_version(
+        event: IndexEvent,
+        assigned_id: IndexAssignedId,
+        version: IndexVersionId,
+    ) -> Self {
         Self {
-            index_id,
+            event,
+            assigned_id,
             version: Some(version),
             technical_result: None,
         }
@@ -63,10 +68,16 @@ impl IndexEventResponse {
         self
     }
 
-    /// Returns the assigned logical [`IndexId`].
+    /// Returns the accepted Indexing event unchanged.
     #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub fn event(&self) -> &IndexEvent {
+        &self.event
+    }
+
+    /// Returns the identity assigned to the referenced source object.
+    #[must_use]
+    pub fn assigned_id(&self) -> &IndexAssignedId {
+        &self.assigned_id
     }
 
     /// Returns optional logical version metadata.
@@ -81,10 +92,23 @@ impl IndexEventResponse {
         self.technical_result.as_deref()
     }
 
-    /// Consumes the response and returns its assigned logical index id.
+    /// Consumes the response and returns the event together with its assigned
+    /// entity identity.
     #[must_use]
-    pub fn into_index_id(self) -> IndexId {
-        self.index_id
+    pub fn into_parts(self) -> (IndexEvent, IndexAssignedId) {
+        (self.event, self.assigned_id)
+    }
+
+    /// Consumes the response and returns the accepted event.
+    #[must_use]
+    pub fn into_event(self) -> IndexEvent {
+        self.event
+    }
+
+    /// Consumes the response and returns only the assigned entity identity.
+    #[must_use]
+    pub fn into_assigned_id(self) -> IndexAssignedId {
+        self.assigned_id
     }
 }
 
@@ -92,8 +116,8 @@ impl fmt::Display for IndexEventResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "IndexEventResponse(index_id={:?})",
-            self.index_id
+            "IndexEventResponse(assigned_id={})",
+            self.assigned_id
         )
     }
 }
@@ -101,78 +125,157 @@ impl fmt::Display for IndexEventResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::EntityType;
+    use crate::identity::{INDEX_ASSIGNED_ID_BYTE_LEN, IndexNamespace};
+    use crate::index::{
+        ConsistencyRequirement, IndexFamily, KeyDefinition, KeyMaterial, ObjectReference,
+        TargetReferenceType, Uniqueness,
+    };
+    use crate::requirement::IndexRequirement;
+    use nizaam_core::contracts::{
+        ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
+        Participants, PayloadDescriptor, UniversalRequest, Version,
+    };
+    use nizaam_core::identity::{CapabilityId, ContractId, CorrelationId, EngineId, MessageId};
+    use nizaam_core::operation::{Operation, OperationContext};
 
-    fn index_id() -> IndexId {
-        IndexId::from_bytes([0x11; crate::identity::INDEX_ID_BYTE_LEN])
+    fn event() -> IndexEvent {
+        let capability =
+            CapabilityId::new("nizaam.indexing.event.response.test").expect("capability id");
+        let contract =
+            ContractId::new("nizaam.indexing.event.response.contract").expect("contract id");
+        let version = Version::new(1, 0, 0);
+        let payload_descriptor =
+            PayloadDescriptor::new("application/octet-stream", version.clone())
+                .expect("payload descriptor");
+        let descriptor = ContractDescriptor::new(
+            contract,
+            capability,
+            version,
+            Interaction::Request,
+            payload_descriptor.clone(),
+        );
+        let participants = Participants::new(
+            EngineId::new("nizaam.source.test").expect("source id"),
+            EngineId::new("nizaam.indexing.test").expect("target id"),
+        );
+        let metadata = ContractMetadata::new(descriptor, participants);
+        let operation = Operation::new(
+            nizaam_core::identity::OperationId::new("index-event.response.operation")
+                .expect("operation id"),
+            CorrelationId::new("index-event.response.correlation").expect("correlation id"),
+        );
+        let envelope = MessageEnvelope::new(
+            MessageId::new("index-event.response.message").expect("message id"),
+            OperationContext::new(operation),
+            metadata,
+            EncodedPayload::new(payload_descriptor, b"source-owned-payload".to_vec()),
+        );
+        let request = UniversalRequest::new(envelope);
+
+        let requirement = IndexRequirement::new(
+            IndexNamespace::new("logical").expect("namespace"),
+            IndexFamily::Inverted,
+            KeyDefinition::new(["term"]).expect("key definition"),
+            TargetReferenceType::new("source.object").expect("target type"),
+            Uniqueness::NonUnique,
+            ConsistencyRequirement::new("logical").expect("consistency"),
+            None,
+            None,
+        )
+        .expect("requirement");
+
+        IndexEvent::new(
+            request,
+            EntityType::new("word").expect("entity type"),
+            requirement,
+            ObjectReference::new("nizaam.source.test", "object:1").expect("object reference"),
+            KeyMaterial::text("term"),
+        )
+        .expect("IndexEvent must be valid")
     }
 
-    fn version_id() -> IndexVersionId {
-        IndexVersionId::new("v1").expect("test IndexVersionId must be valid")
+    fn assigned_id() -> IndexAssignedId {
+        IndexAssignedId::from_parts(
+            crate::index::TargetReferenceType::new("source.object").expect("target type"),
+            [0x11; INDEX_ASSIGNED_ID_BYTE_LEN],
+        )
     }
 
     #[test]
-    fn primary_success_result_is_the_logical_index_id() {
-        let id = index_id();
-        let response = IndexEventResponse::new(id);
+    fn primary_success_result_preserves_event_and_returns_assigned_id() {
+        let event = event();
+        let assigned_id = assigned_id();
+        let response = IndexEventResponse::new(event.clone(), assigned_id.clone());
 
-        assert_eq!(response.index_id(), &id);
+        assert_eq!(response.event(), &event);
+        assert_eq!(response.assigned_id(), &assigned_id);
         assert!(response.version().is_none());
         assert!(response.technical_result().is_none());
     }
 
     #[test]
     fn logical_version_metadata_is_optional() {
-        let id = index_id();
-        let version = version_id();
-        let response = IndexEventResponse::with_version(id, version.clone());
+        let event = event();
+        let assigned_id = assigned_id();
+        let version = IndexVersionId::new("v1").expect("test IndexVersionId must be valid");
+        let response = IndexEventResponse::with_version(event, assigned_id, version.clone());
 
         assert_eq!(response.version(), Some(&version));
     }
 
     #[test]
     fn technical_result_information_is_optional_and_indexing_owned() {
-        let response = IndexEventResponse::new(index_id())
-            .with_technical_result("logical index assignment completed");
+        let response = IndexEventResponse::new(event(), assigned_id())
+            .with_technical_result("logical entity assignment completed");
 
         assert_eq!(
             response.technical_result(),
-            Some("logical index assignment completed")
+            Some("logical entity assignment completed")
         );
     }
 
     #[test]
-    fn response_preserves_all_typed_content() {
-        let id = index_id();
-        let version = version_id();
+    fn response_preserves_event_and_all_typed_content() {
+        let event = event();
+        let assigned_id = assigned_id();
+        let version = IndexVersionId::new("v1").expect("test IndexVersionId must be valid");
         let response =
-            IndexEventResponse::with_version(id, version.clone()).with_technical_result("updated");
+            IndexEventResponse::with_version(event.clone(), assigned_id.clone(), version.clone())
+                .with_technical_result("updated");
 
-        assert_eq!(response.index_id(), &id);
+        assert_eq!(response.event(), &event);
+        assert_eq!(response.assigned_id(), &assigned_id);
         assert_eq!(response.version(), Some(&version));
         assert_eq!(response.technical_result(), Some("updated"));
         assert_eq!(
             response.to_string(),
-            format!("IndexEventResponse(index_id={:?})", id)
+            format!("IndexEventResponse(assigned_id={})", assigned_id)
         );
     }
 
     #[test]
-    fn response_consumption_returns_only_the_logical_index_id() {
-        let id = index_id();
-        let response = IndexEventResponse::new(id);
+    fn response_consumption_returns_event_and_assigned_id() {
+        let event = event();
+        let assigned_id = assigned_id();
+        let response = IndexEventResponse::new(event.clone(), assigned_id.clone());
 
-        assert_eq!(response.into_index_id(), id);
+        let (returned_event, returned_id) = response.into_parts();
+
+        assert_eq!(returned_event, event);
+        assert_eq!(returned_id, assigned_id);
     }
 
     #[test]
-    fn response_has_no_event_or_transport_identity() {
-        // The response intentionally contains only Indexing-owned result
-        // content. EventId, MessageId, OperationId, correlation, transport,
-        // retry, cancellation, and deadline remain Core-owned concerns of the
-        // surrounding UniversalResponse boundary.
-        let response = IndexEventResponse::new(index_id());
+    fn response_does_not_create_a_second_core_protocol_identity() {
+        let event = event();
+        let response = IndexEventResponse::new(event.clone(), assigned_id());
 
-        assert!(response.version().is_none());
-        assert!(response.technical_result().is_none());
+        assert_eq!(response.event().event_id(), event.event_id());
+        assert_eq!(response.event().message_id(), event.message_id());
+        assert_eq!(
+            response.event().operation_context(),
+            event.operation_context()
+        );
     }
 }

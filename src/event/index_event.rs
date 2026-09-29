@@ -13,15 +13,18 @@
 //!                 │
 //!                 ▼
 //!          IndexEvent
+//!         ├── EntityType          <- supplied by the source engine
 //!         ├── IndexRequirement
 //!         ├── ObjectReference
 //!         └── KeyMaterial
 //! ```
 //!
-//! `IndexEvent` therefore adds only Indexing-owned logical information. Core
-//! remains the owner of occurrence identity, engine identity transport
-//! metadata, operation/correlation context, cancellation/deadline context,
-//! and the UniversalRequest boundary.
+//! `IndexEvent` therefore adds only the logical information required by the
+//! Indexing Engine. The source engine supplies `EntityType`; Indexing does not
+//! infer domain/entity semantics from the opaque Core payload. Core remains the
+//! owner of occurrence identity, engine identity transport metadata,
+//! operation/correlation context, cancellation/deadline context, and the
+//! UniversalRequest boundary.
 //!
 //! The event contains no physical provider instruction. There is deliberately
 //! no field for a B-tree, HNSW, FAISS, Lucene, GIN, database, table,
@@ -40,12 +43,75 @@ use crate::index::{
 };
 use crate::requirement::{IndexRequirement, IndexRequirementValidationError};
 
+/// Source-supplied classification of the entity represented by an [`IndexEvent`].
+///
+/// This value is supplied by the engine that owns the source entity. The
+/// Indexing Engine treats it as opaque classification metadata and does not
+/// infer it from `source_payload()`.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct EntityType(String);
+
+impl EntityType {
+    /// Creates a validated entity type.
+    pub fn new(value: impl Into<String>) -> Result<Self, EntityTypeValidationError> {
+        let value = value.into();
+
+        if value.is_empty() {
+            return Err(EntityTypeValidationError::Empty);
+        }
+
+        if let Some((index, _)) = value
+            .char_indices()
+            .find(|(_, character)| character.is_control())
+        {
+            return Err(EntityTypeValidationError::ControlCharacter { index });
+        }
+
+        Ok(Self(value))
+    }
+
+    /// Returns the source-supplied entity type.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Validation failures for [`EntityType`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntityTypeValidationError {
+    /// The source engine supplied an empty entity type.
+    Empty,
+
+    /// The entity type contains a Unicode control character.
+    ControlCharacter { index: usize },
+}
+
+impl fmt::Display for EntityTypeValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(formatter, "entity type cannot be empty"),
+            Self::ControlCharacter { index } => {
+                write!(
+                    formatter,
+                    "entity type contains a control character at byte index {index}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for EntityTypeValidationError {}
+
 /// Result type used by the typed [`IndexEvent`] contract.
 pub type IndexEventResult<T> = Result<T, IndexEventValidationError>;
 
 /// Validation failures for an [`IndexEvent`].
 #[derive(Debug, Eq, PartialEq)]
 pub enum IndexEventValidationError {
+    /// The source-supplied entity type is structurally invalid.
+    InvalidEntityType(EntityTypeValidationError),
+
     /// The Indexing-owned requirement is not a valid logical contract.
     InvalidRequirement(IndexRequirementValidationError),
 
@@ -62,6 +128,9 @@ pub enum IndexEventValidationError {
 impl fmt::Display for IndexEventValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidEntityType(error) => {
+                write!(formatter, "invalid EntityType in IndexEvent: {error}")
+            }
             Self::InvalidRequirement(error) => {
                 write!(formatter, "invalid IndexRequirement in IndexEvent: {error}")
             }
@@ -82,6 +151,7 @@ impl fmt::Display for IndexEventValidationError {
 impl Error for IndexEventValidationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::InvalidEntityType(error) => Some(error),
             Self::InvalidRequirement(error) => Some(error),
             Self::InvalidObjectReference(error) => Some(error),
             Self::InvalidKeyMaterial(error) => Some(error),
@@ -117,6 +187,7 @@ impl From<KeyMaterialValidationError> for IndexEventValidationError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexEvent {
     request: UniversalRequest,
+    entity_type: EntityType,
     requirement: IndexRequirement,
     object_reference: ObjectReference,
     key_material: KeyMaterial,
@@ -130,12 +201,14 @@ impl IndexEvent {
     /// transport metadata are intentionally not reconstructed here.
     pub fn new(
         request: UniversalRequest,
+        entity_type: EntityType,
         requirement: IndexRequirement,
         object_reference: ObjectReference,
         key_material: KeyMaterial,
     ) -> IndexEventResult<Self> {
         let event = Self {
             request,
+            entity_type,
             requirement,
             object_reference,
             key_material,
@@ -153,6 +226,10 @@ impl IndexEvent {
         if interaction != Interaction::Request {
             return Err(IndexEventValidationError::InvalidInteraction(interaction));
         }
+
+        EntityType::new(self.entity_type.as_str())
+            .map(|_| ())
+            .map_err(IndexEventValidationError::InvalidEntityType)?;
 
         self.requirement.validate()?;
         ObjectReference::new(
@@ -222,6 +299,15 @@ impl IndexEvent {
     #[must_use]
     pub fn message_id(&self) -> &MessageId {
         self.request.message_id()
+    }
+
+    /// Returns the source-supplied entity type.
+    ///
+    /// Indexing uses this value as classification metadata. It does not infer
+    /// entity semantics from the opaque source payload.
+    #[must_use]
+    pub fn entity_type(&self) -> &EntityType {
+        &self.entity_type
     }
 
     /// Returns the Indexing-owned logical requirement.
@@ -338,6 +424,7 @@ mod tests {
 
         let event = IndexEvent::new(
             request,
+            EntityType::new("word").expect("entity type must be valid"),
             requirement(),
             object_reference(),
             KeyMaterial::text("term"),
@@ -359,6 +446,7 @@ mod tests {
                 EngineId::new("nizaam.source.test").expect("source id must be valid"),
                 None,
             ),
+            EntityType::new("semantic").expect("entity type must be valid"),
             requirement(),
             object_reference(),
             KeyMaterial::text("term"),
@@ -380,6 +468,7 @@ mod tests {
                 EngineId::new("nizaam.source.test").expect("source id must be valid"),
                 None,
             ),
+            EntityType::new("relationship").expect("entity type must be valid"),
             requirement(),
             object_reference(),
             KeyMaterial::Null,
@@ -428,6 +517,7 @@ mod tests {
 
         let error = IndexEvent::new(
             request,
+            EntityType::new("word").expect("entity type must be valid"),
             requirement(),
             object_reference(),
             KeyMaterial::Null,
@@ -455,6 +545,7 @@ mod tests {
 
         let event = IndexEvent::new(
             request,
+            EntityType::new("word").expect("entity type must be valid"),
             requirement(),
             ObjectReference::new("nizaam.source.test", "object:1")
                 .expect("object reference must be valid"),
@@ -463,6 +554,31 @@ mod tests {
         .expect("valid logical event should be accepted");
 
         assert!(event.validate().is_ok());
+    }
+
+    #[test]
+    fn source_supplied_entity_type_is_preserved_without_payload_inference() {
+        let event = IndexEvent::new(
+            request(
+                EngineId::new("nizaam.source.test").expect("source id must be valid"),
+                None,
+            ),
+            EntityType::new("semantic").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::Null,
+        )
+        .expect("logical event must be valid");
+
+        assert_eq!(event.entity_type().as_str(), "semantic");
+        assert_eq!(event.source_payload(), b"source-owned-payload");
+    }
+
+    #[test]
+    fn rejects_empty_source_supplied_entity_type() {
+        let error = EntityType::new("").expect_err("empty entity type must be rejected");
+
+        assert_eq!(error, EntityTypeValidationError::Empty);
     }
 
     #[test]
@@ -478,6 +594,7 @@ mod tests {
                 EngineId::new("nizaam.source.test").expect("source id must be valid"),
                 None,
             ),
+            EntityType::new("word").expect("entity type must be valid"),
             requirement(),
             object_reference(),
             KeyMaterial::Null,

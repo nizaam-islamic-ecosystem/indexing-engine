@@ -12,12 +12,9 @@
 
 use std::num::NonZeroUsize;
 
-use nizaam_indexing::INDEX_ID_BYTE_LEN;
 use nizaam_indexing::consistency::ConsistencyMode;
 use nizaam_indexing::consistency::SynchronizationSnapshot;
-use nizaam_indexing::identity::{
-    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
-};
+use nizaam_indexing::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexFamily, IndexVersion, IndexVersionId,
     IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
@@ -37,14 +34,12 @@ fn definition_id(value: &str) -> IndexDefinitionId {
     IndexDefinitionId::new(value).expect("test definition ID should be valid")
 }
 
-fn index_id(seed: u8, definition: &IndexDefinition) -> IndexId {
-    IndexId::generate(
-        definition.namespace(),
-        definition.definition_id(),
+fn definition_identity(definition: &IndexDefinition) -> IndexDefinitionIdentity {
+    IndexDefinitionIdentity::new(
+        definition.definition_id().clone(),
+        definition.namespace().clone(),
         definition.family(),
-        &KeyMaterial::Unsigned(u128::from(seed)),
     )
-    .expect("test index ID should be generated")
 }
 
 fn definition(
@@ -92,7 +87,6 @@ fn published_version(version_value: &str) -> IndexVersionState {
 }
 
 fn candidate(
-    seed: u8,
     family: IndexFamily,
     definition_value: &str,
     version_value: &str,
@@ -100,7 +94,7 @@ fn candidate(
     indexed_sequence: u64,
 ) -> IndexCandidate {
     let definition = definition("tests.query", definition_value, family);
-    let id = index_id(seed, &definition);
+    let definition_identity = definition_identity(&definition);
 
     let synchronization = SynchronizationSnapshot::from_sequences(
         nizaam_indexing::build::UpdateSequence::new(source_sequence),
@@ -109,7 +103,7 @@ fn candidate(
     .expect("test synchronization should be valid");
 
     IndexCandidate::new(
-        id,
+        definition_identity,
         definition,
         published_version(version_value),
         synchronization,
@@ -133,32 +127,56 @@ fn hybrid_component(query: AtomicQuery) -> HybridQueryComponent {
 #[test]
 fn logical_request_constructors_cover_all_phase4_query_kinds() {
     let exact = QueryRequest::exact(
-        IndexId::from_bytes([1; INDEX_ID_BYTE_LEN]),
+        definition_identity(&definition(
+            "tests.query",
+            "request.1",
+            IndexFamily::Inverted,
+        )),
         KeyMaterial::text("exact"),
     )
     .expect("exact request should be valid");
     let text = QueryRequest::text(
-        IndexId::from_bytes([2; INDEX_ID_BYTE_LEN]),
+        definition_identity(&definition(
+            "tests.query",
+            "request.2",
+            IndexFamily::Inverted,
+        )),
         KeyMaterial::text("text"),
     )
     .expect("text request should be valid");
     let structured = QueryRequest::structured(
-        IndexId::from_bytes([3; INDEX_ID_BYTE_LEN]),
+        definition_identity(&definition(
+            "tests.query",
+            "request.3",
+            IndexFamily::Inverted,
+        )),
         KeyMaterial::text("fields"),
     )
     .expect("structured request should be valid");
     let neighborhood = QueryRequest::neighborhood(
-        IndexId::from_bytes([4; INDEX_ID_BYTE_LEN]),
+        definition_identity(&definition(
+            "tests.query",
+            "request.4",
+            IndexFamily::Inverted,
+        )),
         ObjectReference::new("quran", "verse:1:1").expect("test anchor should be valid"),
     )
     .expect("neighborhood request should be valid");
     let similarity = QueryRequest::similarity(
-        IndexId::from_bytes([5; INDEX_ID_BYTE_LEN]),
+        definition_identity(&definition(
+            "tests.query",
+            "request.5",
+            IndexFamily::Inverted,
+        )),
         KeyMaterial::bytes(vec![1, 2, 3]),
     )
     .expect("similarity request should be valid");
     let filtered = QueryRequest::filtered(
-        IndexId::from_bytes([6; INDEX_ID_BYTE_LEN]),
+        definition_identity(&definition(
+            "tests.query",
+            "request.6",
+            IndexFamily::Inverted,
+        )),
         AtomicQuery::Text {
             query: KeyMaterial::text("base"),
             parameters: None,
@@ -168,7 +186,11 @@ fn logical_request_constructors_cover_all_phase4_query_kinds() {
     .expect("filtered request should be valid");
 
     let hybrid = QueryRequest::hybrid(
-        IndexId::from_bytes([7; INDEX_ID_BYTE_LEN]),
+        definition_identity(&definition(
+            "tests.query",
+            "request.7",
+            IndexFamily::Inverted,
+        )),
         vec![
             hybrid_component(AtomicQuery::Text {
                 query: KeyMaterial::text("one"),
@@ -202,7 +224,6 @@ fn logical_request_constructors_cover_all_phase4_query_kinds() {
 #[test]
 fn logical_request_preserves_selection_hints_limit_consistency_and_result_mode() {
     let selected = candidate(
-        10,
         IndexFamily::Inverted,
         "request-contract",
         "published-v1",
@@ -211,7 +232,7 @@ fn logical_request_preserves_selection_hints_limit_consistency_and_result_mode()
     );
 
     let request = QueryRequest::with_spec(
-        *selected.index_id(),
+        selected.definition_identity().clone(),
         Some(namespace("tests.query")),
         Some(definition_id("request-contract")),
         Some(IndexFamily::Inverted),
@@ -228,7 +249,10 @@ fn logical_request_preserves_selection_hints_limit_consistency_and_result_mode()
     )
     .expect("request should be valid");
 
-    assert_eq!(request.index_id(), selected.index_id());
+    assert_eq!(
+        request.definition_identity(),
+        selected.definition_identity()
+    );
     assert_eq!(request.namespace(), Some(&namespace("tests.query")));
     assert_eq!(
         request.definition_id(),
@@ -249,16 +273,12 @@ fn logical_request_preserves_selection_hints_limit_consistency_and_result_mode()
 
 #[test]
 fn exact_query_builds_an_exact_logical_plan() {
-    let selected = candidate(
-        11,
-        IndexFamily::Identity,
-        "exact-plan",
-        "published-v1",
-        30,
-        30,
-    );
-    let request = QueryRequest::exact(*selected.index_id(), KeyMaterial::text("lookup"))
-        .expect("exact request should be valid");
+    let selected = candidate(IndexFamily::Identity, "exact-plan", "published-v1", 30, 30);
+    let request = QueryRequest::exact(
+        selected.definition_identity().clone(),
+        KeyMaterial::text("lookup"),
+    )
+    .expect("exact request should be valid");
 
     let plan = plan_query(
         &request,
@@ -283,16 +303,9 @@ fn exact_query_builds_an_exact_logical_plan() {
 
 #[test]
 fn text_query_builds_a_text_logical_plan() {
-    let selected = candidate(
-        12,
-        IndexFamily::Inverted,
-        "text-plan",
-        "published-v1",
-        40,
-        40,
-    );
+    let selected = candidate(IndexFamily::Inverted, "text-plan", "published-v1", 40, 40);
     let request = QueryRequest::with_query(
-        *selected.index_id(),
+        selected.definition_identity().clone(),
         QueryKind::Text {
             query: KeyMaterial::text("rust"),
             parameters: Some(KeyMaterial::Unsigned(7)),
@@ -324,7 +337,6 @@ fn text_query_builds_a_text_logical_plan() {
 #[test]
 fn structured_query_builds_a_structured_logical_plan() {
     let selected = candidate(
-        13,
         IndexFamily::Relationship,
         "structured-plan",
         "published-v1",
@@ -337,7 +349,7 @@ fn structured_query_builds_a_structured_logical_plan() {
     ])
     .expect("structured test fields should be valid");
 
-    let request = QueryRequest::structured(*selected.index_id(), fields.clone())
+    let request = QueryRequest::structured(selected.definition_identity().clone(), fields.clone())
         .expect("structured request should be valid");
 
     let plan = plan_query(
@@ -363,7 +375,6 @@ fn structured_query_builds_a_structured_logical_plan() {
 #[test]
 fn neighborhood_query_preserves_opaque_anchor_and_builds_the_expected_plan() {
     let selected = candidate(
-        14,
         IndexFamily::Relationship,
         "neighborhood-plan",
         "published-v1",
@@ -372,8 +383,9 @@ fn neighborhood_query_preserves_opaque_anchor_and_builds_the_expected_plan() {
     );
     let anchor = ObjectReference::new("quran", "verse:2:255").expect("test anchor should be valid");
 
-    let request = QueryRequest::neighborhood(*selected.index_id(), anchor.clone())
-        .expect("neighborhood request should be valid");
+    let request =
+        QueryRequest::neighborhood(selected.definition_identity().clone(), anchor.clone())
+            .expect("neighborhood request should be valid");
 
     let plan = plan_query(
         &request,
@@ -399,15 +411,17 @@ fn neighborhood_query_preserves_opaque_anchor_and_builds_the_expected_plan() {
 #[test]
 fn similarity_query_requires_similarity_and_generic_ranking_capabilities() {
     let selected = candidate(
-        15,
         IndexFamily::Similarity,
         "similarity-plan",
         "published-v1",
         70,
         70,
     );
-    let request = QueryRequest::similarity(*selected.index_id(), KeyMaterial::bytes(vec![1, 2, 3]))
-        .expect("similarity request should be valid");
+    let request = QueryRequest::similarity(
+        selected.definition_identity().clone(),
+        KeyMaterial::bytes(vec![1, 2, 3]),
+    )
+    .expect("similarity request should be valid");
 
     let missing_ranking = capabilities(&[ProviderCapability::SimilarityLookup]);
     let error = plan_query(
@@ -449,7 +463,6 @@ fn similarity_query_requires_similarity_and_generic_ranking_capabilities() {
 #[test]
 fn filtered_query_requires_filtered_lookup_and_preserves_the_atomic_base_query() {
     let selected = candidate(
-        16,
         IndexFamily::Inverted,
         "filtered-plan",
         "published-v1",
@@ -466,8 +479,12 @@ fn filtered_query_requires_filtered_lookup_and_preserves_the_atomic_base_query()
     ])
     .expect("test filter should be valid");
 
-    let request = QueryRequest::filtered(*selected.index_id(), base.clone(), filter.clone())
-        .expect("filtered request should be valid");
+    let request = QueryRequest::filtered(
+        selected.definition_identity().clone(),
+        base.clone(),
+        filter.clone(),
+    )
+    .expect("filtered request should be valid");
 
     let plan = plan_query(
         &request,
@@ -493,7 +510,6 @@ fn filtered_query_requires_filtered_lookup_and_preserves_the_atomic_base_query()
 #[test]
 fn native_hybrid_query_uses_the_provider_native_hybrid_capability() {
     let selected = candidate(
-        17,
         IndexFamily::Inverted,
         "hybrid-native-plan",
         "published-v1",
@@ -502,7 +518,7 @@ fn native_hybrid_query_uses_the_provider_native_hybrid_capability() {
     );
 
     let request = QueryRequest::hybrid(
-        *selected.index_id(),
+        selected.definition_identity().clone(),
         vec![
             hybrid_component(AtomicQuery::Text {
                 query: KeyMaterial::text("rust"),
@@ -551,7 +567,6 @@ fn native_hybrid_query_uses_the_provider_native_hybrid_capability() {
 #[test]
 fn composed_hybrid_query_uses_individual_component_capabilities() {
     let selected = candidate(
-        18,
         IndexFamily::Inverted,
         "hybrid-composed-plan",
         "published-v1",
@@ -560,7 +575,7 @@ fn composed_hybrid_query_uses_individual_component_capabilities() {
     );
 
     let request = QueryRequest::hybrid(
-        *selected.index_id(),
+        selected.definition_identity().clone(),
         vec![
             hybrid_component(AtomicQuery::Text {
                 query: KeyMaterial::text("rust"),
@@ -609,7 +624,6 @@ fn composed_hybrid_query_uses_individual_component_capabilities() {
 #[test]
 fn selection_hints_are_enforced_by_the_logical_planner() {
     let selected = candidate(
-        19,
         IndexFamily::Inverted,
         "selection-hints",
         "published-v1",
@@ -618,7 +632,7 @@ fn selection_hints_are_enforced_by_the_logical_planner() {
     );
 
     let request = QueryRequest::with_spec(
-        *selected.index_id(),
+        selected.definition_identity().clone(),
         Some(namespace("tests.query")),
         Some(definition_id("selection-hints")),
         Some(IndexFamily::Inverted),
@@ -649,7 +663,7 @@ fn selection_hints_are_enforced_by_the_logical_planner() {
     );
 
     let wrong = QueryRequest::with_spec(
-        *selected.index_id(),
+        selected.definition_identity().clone(),
         Some(namespace("tests.query")),
         Some(definition_id("different-definition")),
         Some(IndexFamily::Inverted),
@@ -681,15 +695,17 @@ fn selection_hints_are_enforced_by_the_logical_planner() {
 #[test]
 fn current_query_accepts_a_zero_lag_published_candidate_and_rejects_positive_lag() {
     let current = candidate(
-        20,
         IndexFamily::Inverted,
         "current-query",
         "published-current",
         120,
         120,
     );
-    let request = QueryRequest::text(*current.index_id(), KeyMaterial::text("current"))
-        .expect("text request should be valid");
+    let request = QueryRequest::text(
+        current.definition_identity().clone(),
+        KeyMaterial::text("current"),
+    )
+    .expect("text request should be valid");
 
     let plan = plan_query(
         &request,
@@ -714,15 +730,17 @@ fn current_query_accepts_a_zero_lag_published_candidate_and_rejects_positive_lag
     );
 
     let lagged = candidate(
-        21,
         IndexFamily::Inverted,
         "current-query-lagged",
         "published-lagged",
         120,
         119,
     );
-    let lagged_request = QueryRequest::text(*lagged.index_id(), KeyMaterial::text("lagged"))
-        .expect("lagged query should still be structurally valid");
+    let lagged_request = QueryRequest::text(
+        lagged.definition_identity().clone(),
+        KeyMaterial::text("lagged"),
+    )
+    .expect("lagged query should still be structurally valid");
 
     let error = plan_query(
         &lagged_request,
@@ -741,7 +759,6 @@ fn current_query_accepts_a_zero_lag_published_candidate_and_rejects_positive_lag
 #[test]
 fn version_pinned_query_selects_the_exact_requested_published_version() {
     let selected = candidate(
-        22,
         IndexFamily::Inverted,
         "pinned-query",
         "published-v7",
@@ -749,7 +766,7 @@ fn version_pinned_query_selects_the_exact_requested_published_version() {
         130,
     );
     let request = QueryRequest::with_query_options(
-        *selected.index_id(),
+        selected.definition_identity().clone(),
         QueryKind::Text {
             query: KeyMaterial::text("pinned"),
             parameters: None,
@@ -790,15 +807,17 @@ fn version_pinned_query_selects_the_exact_requested_published_version() {
 #[test]
 fn unavailable_provider_is_rejected_before_logical_query_plan_creation() {
     let selected = candidate(
-        23,
         IndexFamily::Identity,
         "unavailable-provider",
         "published-v1",
         140,
         140,
     );
-    let request = QueryRequest::exact(*selected.index_id(), KeyMaterial::text("term"))
-        .expect("exact request should be valid");
+    let request = QueryRequest::exact(
+        selected.definition_identity().clone(),
+        KeyMaterial::text("term"),
+    )
+    .expect("exact request should be valid");
 
     let error = plan_query(
         &request,
@@ -819,15 +838,17 @@ fn unavailable_provider_is_rejected_before_logical_query_plan_creation() {
 #[test]
 fn unsupported_logical_query_capability_is_not_silently_rewritten() {
     let selected = candidate(
-        24,
         IndexFamily::Similarity,
         "unsupported-capability",
         "published-v1",
         150,
         150,
     );
-    let request = QueryRequest::similarity(*selected.index_id(), KeyMaterial::bytes(vec![9, 8, 7]))
-        .expect("similarity request should be valid");
+    let request = QueryRequest::similarity(
+        selected.definition_identity().clone(),
+        KeyMaterial::bytes(vec![9, 8, 7]),
+    )
+    .expect("similarity request should be valid");
 
     let error = plan_query(
         &request,

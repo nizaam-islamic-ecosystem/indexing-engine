@@ -16,7 +16,7 @@ use common::{
 use nizaam_core::control_plane::registry::RegistryError;
 use nizaam_core::error::InvalidTransition;
 use nizaam_core::runtime::{LifecycleState, RequestAdmissionError};
-use nizaam_indexing::engine::EngineSetupError;
+use nizaam_indexing::engine::runtime::EngineSetupError;
 
 #[test]
 fn engine_construction_exposes_stable_engine_and_instance_identity() {

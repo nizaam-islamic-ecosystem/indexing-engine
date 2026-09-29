@@ -59,17 +59,18 @@ pub mod requirement;
 pub mod security;
 
 pub use engine::{
-    CapabilitySet, EngineSetupError, IndexingEngine, IndexingRegistration, IndexingRuntime,
-    RegistrationResult, RequestHandlingError, RuntimeDispatchResult, UniversalRequestResult,
+    CapabilitySet, EngineSetupError, IndexEventHandlingError, IndexingEngine, IndexingRegistration,
+    IndexingRuntime, RegistrationResult, RequestHandlingError, RuntimeDispatchResult,
+    UniversalRequestResult,
 };
 
 pub use error::IndexingResult;
 
 pub use identity::{
-    INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexDefinitionId, IndexDefinitionIdValidationError,
-    IndexDefinitionIdentity, IndexId, IndexIdGenerationError, IndexIdGenerationVersion,
-    IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry, NamespaceRegistryError,
-    NamespaceValidationError,
+    INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexAssignedId, IndexDefinitionId,
+    IndexDefinitionIdValidationError, IndexDefinitionIdentity, IndexId, IndexIdGenerationError,
+    IndexIdGenerationVersion, IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry,
+    NamespaceRegistryError, NamespaceValidationError,
 };
 
 // Keep the established Phase 1-3 index exports intact. The query types here
@@ -135,7 +136,10 @@ pub use recovery::{
 // Phase 5 event public surface
 // -----------------------------------------------------------------------------
 
-pub use event::{IndexEvent, IndexEventResponse, IndexEventResult, IndexEventValidationError};
+pub use event::{
+    EntityType, EntityTypeValidationError, IndexEvent, IndexEventResponse, IndexEventResult,
+    IndexEventValidationError,
+};
 
 // -----------------------------------------------------------------------------
 // Phase 4 consistency public surface
@@ -194,65 +198,3 @@ pub use observability::{IndexingDiagnostics, IndexingLogger, IndexingMetrics, In
 // -----------------------------------------------------------------------------
 
 pub use security::{IndexingAuthorizationError, IndexingAuthorizationRequirement};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -------------------------------------------------------------------------
-    // Level 2: Phase 6 public observability boundary
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn phase_6_observability_adapters_are_exposed_at_crate_root() {
-        let diagnostics = IndexingDiagnostics::new();
-        let metrics = IndexingMetrics::new();
-        let tracer = IndexingTracer::new();
-
-        assert_eq!(diagnostics, IndexingDiagnostics::new());
-        assert_eq!(tracer, IndexingTracer::new());
-        assert!(metrics.snapshot().unwrap().is_empty());
-    }
-
-    // -------------------------------------------------------------------------
-    // Level 2: Phase 6 security boundary
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn phase_6_security_requirement_is_exposed_at_crate_root() {
-        use nizaam_core::identity::{EngineId, EngineInstanceId};
-
-        let engine_id =
-            EngineId::new("nizaam.indexing.test").expect("test engine id must be valid");
-        let instance_id = EngineInstanceId::new("nizaam.indexing.test.instance")
-            .expect("test engine instance id must be valid");
-
-        let requirement =
-            IndexingAuthorizationRequirement::new(engine_id.clone(), instance_id.clone());
-
-        assert_eq!(requirement.engine_id(), &engine_id);
-        assert_eq!(requirement.engine_instance_id(), &instance_id);
-        assert!(requirement.matches_target(&engine_id, &instance_id));
-    }
-
-    // -------------------------------------------------------------------------
-    // Level 2: existing public contract regression
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn existing_event_public_surface_remains_available() {
-        let _ = core::any::TypeId::of::<IndexEvent>();
-        let _ = core::any::TypeId::of::<IndexEventResponse>();
-        let _ = core::any::TypeId::of::<IndexEventResult<()>>();
-        let _ = core::any::TypeId::of::<IndexEventValidationError>();
-    }
-
-    #[test]
-    fn existing_configuration_public_surface_remains_available() {
-        let configuration = IndexingConfiguration::new(8, 2, 2, 1, 16, 1024, 128, 32)
-            .expect("test configuration should be valid");
-
-        assert_eq!(configuration.max_concurrent_queries().get(), 8);
-        assert_eq!(configuration.max_batch_size().get(), 1024);
-    }
-}

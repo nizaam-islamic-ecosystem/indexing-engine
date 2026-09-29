@@ -20,7 +20,7 @@ use core::fmt;
 use core::num::NonZeroUsize;
 
 use crate::consistency::policy::ConsistencyMode;
-use crate::identity::{IndexDefinitionId, IndexId, IndexNamespace};
+use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
 use crate::index::{
     IndexFamily, KeyMaterial, KeyMaterialValidationError, ObjectReference,
     ObjectReferenceValidationError,
@@ -174,12 +174,12 @@ impl AtomicQuery {
 
 /// One logical component of a hybrid query.
 ///
-/// A component may optionally target another logical `IndexId`. When no target
+/// A component may optionally target another logical definition identity. When no target
 /// is supplied, the parent [`QueryRequest`] index is used by the later planner.
 /// The component itself remains provider-neutral.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HybridQueryComponent {
-    target_index_id: Option<IndexId>,
+    target_definition_identity: Option<IndexDefinitionIdentity>,
     query: AtomicQuery,
     filter: Option<KeyMaterial>,
 }
@@ -193,12 +193,12 @@ impl HybridQueryComponent {
     /// Constructs a hybrid component with an optional logical index target and
     /// generic filter material.
     pub fn with_options(
-        target_index_id: Option<IndexId>,
+        target_definition_identity: Option<IndexDefinitionIdentity>,
         query: AtomicQuery,
         filter: Option<KeyMaterial>,
     ) -> Result<Self, HybridQueryComponentValidationError> {
         let component = Self {
-            target_index_id,
+            target_definition_identity,
             query,
             filter,
         };
@@ -209,8 +209,8 @@ impl HybridQueryComponent {
 
     /// Returns the optional logical component target.
     #[must_use]
-    pub fn target_index_id(&self) -> Option<&IndexId> {
-        self.target_index_id.as_ref()
+    pub fn target_definition_identity(&self) -> Option<&IndexDefinitionIdentity> {
+        self.target_definition_identity.as_ref()
     }
 
     /// Returns the component's atomic logical query.
@@ -242,8 +242,14 @@ impl HybridQueryComponent {
 
     /// Consumes the component and returns its logical parts.
     #[must_use]
-    pub fn into_parts(self) -> (Option<IndexId>, AtomicQuery, Option<KeyMaterial>) {
-        (self.target_index_id, self.query, self.filter)
+    pub fn into_parts(
+        self,
+    ) -> (
+        Option<IndexDefinitionIdentity>,
+        AtomicQuery,
+        Option<KeyMaterial>,
+    ) {
+        (self.target_definition_identity, self.query, self.filter)
     }
 }
 
@@ -413,7 +419,7 @@ impl QueryKind {
 /// physical execution belong to later layers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryRequest {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     namespace: Option<IndexNamespace>,
     definition_id: Option<IndexDefinitionId>,
     family: Option<IndexFamily>,
@@ -426,7 +432,7 @@ pub struct QueryRequest {
 
 /// Owned components returned by the canonical Phase 4 request decomposition.
 pub type QueryRequestParts = (
-    IndexId,
+    IndexDefinitionIdentity,
     Option<IndexNamespace>,
     Option<IndexDefinitionId>,
     Option<IndexFamily>,
@@ -448,20 +454,23 @@ impl QueryRequest {
     /// - no selector hints;
     /// - no result-count limit;
     /// - no additional metadata.
-    pub fn new(index_id: IndexId, query: KeyMaterial) -> Result<Self, QueryRequestValidationError> {
-        Self::with_options(index_id, query, None, None)
+    pub fn new(
+        definition_identity: IndexDefinitionIdentity,
+        query: KeyMaterial,
+    ) -> Result<Self, QueryRequestValidationError> {
+        Self::with_options(definition_identity, query, None, None)
     }
 
     /// Constructs a backwards-compatible exact request with optional limit
     /// and generic metadata.
     pub fn with_options(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         query: KeyMaterial,
         limit: Option<NonZeroUsize>,
         metadata: Option<KeyMaterial>,
     ) -> Result<Self, QueryRequestValidationError> {
         Self::with_query_options(
-            index_id,
+            definition_identity,
             QueryKind::Exact { key: query },
             limit,
             ConsistencyMode::Current,
@@ -473,11 +482,11 @@ impl QueryRequest {
     /// Constructs a logical request with the supplied query kind and the
     /// canonical Phase 4 defaults for consistency/result mode.
     pub fn with_query(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         query: QueryKind,
     ) -> Result<Self, QueryRequestValidationError> {
         Self::with_query_options(
-            index_id,
+            definition_identity,
             query,
             None,
             ConsistencyMode::Current,
@@ -489,7 +498,7 @@ impl QueryRequest {
     /// Constructs a logical request with a query, result limit, consistency
     /// mode, result representation, and generic metadata.
     pub fn with_query_options(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         query: QueryKind,
         limit: Option<NonZeroUsize>,
         consistency: ConsistencyMode,
@@ -497,7 +506,7 @@ impl QueryRequest {
         metadata: Option<KeyMaterial>,
     ) -> Result<Self, QueryRequestValidationError> {
         Self::with_spec(
-            index_id,
+            definition_identity,
             None,
             None,
             None,
@@ -516,7 +525,7 @@ impl QueryRequest {
     /// table, or physical index implementation.
     #[allow(clippy::too_many_arguments)]
     pub fn with_spec(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         namespace: Option<IndexNamespace>,
         definition_id: Option<IndexDefinitionId>,
         family: Option<IndexFamily>,
@@ -527,7 +536,7 @@ impl QueryRequest {
         metadata: Option<KeyMaterial>,
     ) -> Result<Self, QueryRequestValidationError> {
         let request = Self {
-            index_id,
+            definition_identity,
             namespace,
             definition_id,
             family,
@@ -543,17 +552,20 @@ impl QueryRequest {
     }
 
     /// Convenience constructor for an exact logical query.
-    pub fn exact(index_id: IndexId, key: KeyMaterial) -> Result<Self, QueryRequestValidationError> {
-        Self::with_query(index_id, QueryKind::Exact { key })
+    pub fn exact(
+        definition_identity: IndexDefinitionIdentity,
+        key: KeyMaterial,
+    ) -> Result<Self, QueryRequestValidationError> {
+        Self::with_query(definition_identity, QueryKind::Exact { key })
     }
 
     /// Convenience constructor for a logical text query.
     pub fn text(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         query: KeyMaterial,
     ) -> Result<Self, QueryRequestValidationError> {
         Self::with_query(
-            index_id,
+            definition_identity,
             QueryKind::Text {
                 query,
                 parameters: None,
@@ -563,27 +575,30 @@ impl QueryRequest {
 
     /// Convenience constructor for a logical structured query.
     pub fn structured(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         fields: KeyMaterial,
     ) -> Result<Self, QueryRequestValidationError> {
-        Self::with_query(index_id, QueryKind::Structured { fields })
+        Self::with_query(definition_identity, QueryKind::Structured { fields })
     }
 
     /// Convenience constructor for a logical neighborhood query.
     pub fn neighborhood(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         anchor: ObjectReference,
     ) -> Result<Self, QueryRequestValidationError> {
-        Self::with_query(index_id, QueryKind::Neighborhood { anchor, key: None })
+        Self::with_query(
+            definition_identity,
+            QueryKind::Neighborhood { anchor, key: None },
+        )
     }
 
     /// Convenience constructor for a logical similarity query.
     pub fn similarity(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         representation: KeyMaterial,
     ) -> Result<Self, QueryRequestValidationError> {
         Self::with_query(
-            index_id,
+            definition_identity,
             QueryKind::Similarity {
                 representation,
                 parameters: None,
@@ -593,25 +608,25 @@ impl QueryRequest {
 
     /// Convenience constructor for a logical filtered query.
     pub fn filtered(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         base: AtomicQuery,
         filter: KeyMaterial,
     ) -> Result<Self, QueryRequestValidationError> {
-        Self::with_query(index_id, QueryKind::Filtered { base, filter })
+        Self::with_query(definition_identity, QueryKind::Filtered { base, filter })
     }
 
     /// Convenience constructor for a logical hybrid query.
     pub fn hybrid(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         components: Vec<HybridQueryComponent>,
     ) -> Result<Self, QueryRequestValidationError> {
-        Self::with_query(index_id, QueryKind::Hybrid { components })
+        Self::with_query(definition_identity, QueryKind::Hybrid { components })
     }
 
     /// Returns the logical index target supplied by the caller.
     #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the optional logical namespace selection hint.
@@ -703,7 +718,7 @@ impl QueryRequest {
     #[must_use]
     pub fn into_parts(self) -> QueryRequestParts {
         (
-            self.index_id,
+            self.definition_identity,
             self.namespace,
             self.definition_id,
             self.family,
@@ -942,11 +957,17 @@ impl std::error::Error for QueryRequestValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::index::INDEX_ID_BYTE_LEN;
+    use crate::index::IndexFamily;
     use crate::index::IndexVersionId;
 
-    fn index_id(byte: u8) -> IndexId {
-        IndexId::from_bytes([byte; INDEX_ID_BYTE_LEN])
+    fn definition_identity(byte: u8) -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            crate::identity::IndexDefinitionId::new(format!("query.definition.{byte}"))
+                .expect("test definition ID should be valid"),
+            crate::identity::IndexNamespace::new(format!("query.namespace.{byte}"))
+                .expect("test namespace should be valid"),
+            IndexFamily::Inverted,
+        )
     }
 
     fn object_reference() -> ObjectReference {
@@ -959,10 +980,10 @@ mod tests {
 
     #[test]
     fn legacy_new_constructs_an_exact_current_reference_only_request() {
-        let request = QueryRequest::new(index_id(0x11), KeyMaterial::text("bismillah"))
+        let request = QueryRequest::new(definition_identity(0x11), KeyMaterial::text("bismillah"))
             .expect("request should be valid");
 
-        assert_eq!(request.index_id(), &index_id(0x11));
+        assert_eq!(request.definition_identity(), &definition_identity(0x11));
         assert!(matches!(request.query_kind(), QueryKind::Exact { .. }));
         assert!(matches!(request.consistency(), ConsistencyMode::Current));
         assert_eq!(request.result_mode(), ResultMode::ReferencesOnly);
@@ -979,7 +1000,7 @@ mod tests {
         let limit = NonZeroUsize::new(7).expect("test limit should be non-zero");
 
         let request = QueryRequest::with_options(
-            index_id(0x12),
+            definition_identity(0x12),
             KeyMaterial::text("term"),
             Some(limit),
             Some(metadata.clone()),
@@ -997,7 +1018,7 @@ mod tests {
         let definition = IndexDefinitionId::new("verse-term").expect("definition should be valid");
 
         let request = QueryRequest::with_spec(
-            index_id(0x13),
+            definition_identity(0x13),
             Some(namespace.clone()),
             Some(definition.clone()),
             Some(IndexFamily::Inverted),
@@ -1026,18 +1047,20 @@ mod tests {
 
     #[test]
     fn convenience_constructors_cover_all_query_kinds() {
-        let exact = QueryRequest::exact(index_id(1), KeyMaterial::text("exact"))
+        let exact = QueryRequest::exact(definition_identity(1), KeyMaterial::text("exact"))
             .expect("exact request should be valid");
-        let text = QueryRequest::text(index_id(2), KeyMaterial::text("text"))
+        let text = QueryRequest::text(definition_identity(2), KeyMaterial::text("text"))
             .expect("text request should be valid");
-        let structured = QueryRequest::structured(index_id(3), KeyMaterial::text("fields"))
-            .expect("structured request should be valid");
-        let neighborhood = QueryRequest::neighborhood(index_id(4), object_reference())
+        let structured =
+            QueryRequest::structured(definition_identity(3), KeyMaterial::text("fields"))
+                .expect("structured request should be valid");
+        let neighborhood = QueryRequest::neighborhood(definition_identity(4), object_reference())
             .expect("neighborhood request should be valid");
-        let similarity = QueryRequest::similarity(index_id(5), KeyMaterial::text("vector"))
-            .expect("similarity request should be valid");
+        let similarity =
+            QueryRequest::similarity(definition_identity(5), KeyMaterial::text("vector"))
+                .expect("similarity request should be valid");
         let filtered = QueryRequest::filtered(
-            index_id(6),
+            definition_identity(6),
             AtomicQuery::Exact {
                 key: KeyMaterial::text("base"),
             },
@@ -1054,7 +1077,7 @@ mod tests {
             parameters: None,
         })
         .expect("second hybrid component should be valid");
-        let hybrid = QueryRequest::hybrid(index_id(7), vec![first, second])
+        let hybrid = QueryRequest::hybrid(definition_identity(7), vec![first, second])
             .expect("hybrid request should be valid");
 
         assert!(matches!(exact.query_kind(), QueryKind::Exact { .. }));
@@ -1078,7 +1101,7 @@ mod tests {
     #[test]
     fn rejects_invalid_query_material() {
         let invalid = KeyMaterial::Sequence(vec![KeyMaterial::Text("valid".into())]);
-        let request = QueryRequest::new(index_id(8), invalid);
+        let request = QueryRequest::new(definition_identity(8), invalid);
 
         assert!(request.is_ok());
         // The current `KeyMaterial` representation is validated structurally;
@@ -1095,9 +1118,13 @@ mod tests {
             value = KeyMaterial::Sequence(vec![value]);
         }
 
-        let error =
-            QueryRequest::with_options(index_id(9), KeyMaterial::text("query"), None, Some(value))
-                .expect_err("over-depth metadata should be rejected");
+        let error = QueryRequest::with_options(
+            definition_identity(9),
+            KeyMaterial::text("query"),
+            None,
+            Some(value),
+        )
+        .expect_err("over-depth metadata should be rejected");
 
         assert!(matches!(
             error,
@@ -1126,7 +1153,7 @@ mod tests {
         })
         .expect("component should be valid");
 
-        let error = QueryRequest::hybrid(index_id(10), vec![component])
+        let error = QueryRequest::hybrid(definition_identity(10), vec![component])
             .expect_err("single-component hybrid must be rejected");
 
         assert!(matches!(
@@ -1139,7 +1166,7 @@ mod tests {
 
     #[test]
     fn empty_hybrid_is_rejected() {
-        let error = QueryRequest::hybrid(index_id(11), Vec::new())
+        let error = QueryRequest::hybrid(definition_identity(11), Vec::new())
             .expect_err("empty hybrid must be rejected");
 
         assert!(matches!(
@@ -1150,9 +1177,9 @@ mod tests {
 
     #[test]
     fn hybrid_component_can_target_another_logical_index_without_physical_metadata() {
-        let target = index_id(0x55);
+        let target = definition_identity(0x55);
         let component = HybridQueryComponent::with_options(
-            Some(target),
+            Some(target.clone()),
             AtomicQuery::Structured {
                 fields: KeyMaterial::text("field=value"),
             },
@@ -1160,7 +1187,7 @@ mod tests {
         )
         .expect("component should be valid");
 
-        assert_eq!(component.target_index_id(), Some(&target));
+        assert_eq!(component.target_definition_identity(), Some(&target));
         assert!(component.filter().is_some());
     }
 
@@ -1175,7 +1202,7 @@ mod tests {
         })
         .expect("component should be valid");
 
-        let request = QueryRequest::hybrid(index_id(12), vec![first, second])
+        let request = QueryRequest::hybrid(definition_identity(12), vec![first, second])
             .expect("hybrid request should be valid");
 
         assert_eq!(request.query_material(), None);
@@ -1192,7 +1219,7 @@ mod tests {
         let limit = NonZeroUsize::new(9).expect("limit should be non-zero");
 
         let request = QueryRequest::with_spec(
-            index_id(13),
+            definition_identity(13),
             Some(namespace.clone()),
             Some(definition.clone()),
             Some(IndexFamily::Inverted),
@@ -1205,7 +1232,7 @@ mod tests {
         .expect("request should be valid");
 
         let (
-            returned_index_id,
+            returned_definition_identity,
             returned_namespace,
             returned_definition,
             returned_family,
@@ -1216,7 +1243,7 @@ mod tests {
             returned_metadata,
         ) = request.into_parts();
 
-        assert_eq!(returned_index_id, index_id(13));
+        assert_eq!(returned_definition_identity, definition_identity(13));
         assert_eq!(returned_namespace, Some(namespace));
         assert_eq!(returned_definition, Some(definition));
         assert_eq!(returned_family, Some(IndexFamily::Inverted));
@@ -1232,7 +1259,7 @@ mod tests {
 
     #[test]
     fn request_validation_is_repeatable() {
-        let request = QueryRequest::text(index_id(14), KeyMaterial::text("term"))
+        let request = QueryRequest::text(definition_identity(14), KeyMaterial::text("term"))
             .expect("request should be valid");
 
         assert_eq!(request.validate(), request.validate());

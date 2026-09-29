@@ -6,9 +6,12 @@
 
 use nizaam_indexing::{
     ConsistencyRequirement, IndexEvent, IndexEventResponse, IndexEventValidationError, IndexFamily,
-    IndexId, IndexNamespace, IndexRequirement, KeyDefinition, KeyMaterial, ObjectReference,
+    IndexNamespace, IndexRequirement, KeyDefinition, KeyMaterial, ObjectReference,
     TargetReferenceType, Uniqueness,
 };
+
+use nizaam_indexing::event::EntityType;
+use nizaam_indexing::identity::IndexAssignedId;
 
 use nizaam_core::contracts::{
     ContractDescriptor, ContractMetadata, EncodedPayload, Interaction, MessageEnvelope,
@@ -96,15 +99,12 @@ fn logical_event(sender_instance: Option<EngineInstanceId>) -> IndexEvent {
             Interaction::Request,
             b"source-owned-payload",
         ),
+        EntityType::new("semantic").expect("entity type should be valid"),
         requirement(),
         object_reference(),
         KeyMaterial::text("term"),
     )
     .expect("logical IndexEvent should be valid")
-}
-
-fn index_id(seed: u8) -> IndexId {
-    IndexId::from_bytes([seed; nizaam_indexing::INDEX_ID_BYTE_LEN])
 }
 
 #[test]
@@ -126,6 +126,7 @@ fn request_is_wrapped_as_a_typed_index_event_without_rebuilding_core_identity() 
 
     let event = IndexEvent::new(
         request,
+        EntityType::new("semantic").expect("entity type should be valid"),
         requirement(),
         object_reference(),
         KeyMaterial::text("term"),
@@ -193,6 +194,7 @@ fn response_interaction_cannot_be_accepted_as_an_index_event() {
 
     let error = IndexEvent::new(
         request,
+        EntityType::new("semantic").expect("entity type should be valid"),
         requirement(),
         object_reference(),
         KeyMaterial::Null,
@@ -218,6 +220,7 @@ fn consuming_index_event_returns_the_original_universal_request() {
 
     let event = IndexEvent::new(
         request,
+        EntityType::new("semantic").expect("entity type should be valid"),
         requirement(),
         object_reference(),
         KeyMaterial::Null,
@@ -239,24 +242,35 @@ fn consuming_index_event_returns_the_original_universal_request() {
 }
 
 #[test]
-fn response_primary_success_value_is_the_logical_index_id() {
-    let id = index_id(0x11);
-    let response = IndexEventResponse::new(id);
+fn response_primary_success_value_is_the_assigned_entity_id() {
+    let event = logical_event(None);
+    let assigned_id = IndexAssignedId::generate(
+        &TargetReferenceType::new("source.object").expect("target reference type should be valid"),
+        event.object_reference(),
+    );
+    let response = IndexEventResponse::new(event.clone(), assigned_id.clone());
 
-    assert_eq!(response.index_id(), &id);
+    assert_eq!(response.event(), &event);
+    assert_eq!(response.assigned_id(), &assigned_id);
     assert!(response.version().is_none());
     assert!(response.technical_result().is_none());
 }
 
 #[test]
 fn response_can_carry_optional_logical_version_and_technical_result() {
-    let id = index_id(0x22);
+    let event = logical_event(None);
+    let assigned_id = IndexAssignedId::generate(
+        &TargetReferenceType::new("source.object").expect("target reference type should be valid"),
+        event.object_reference(),
+    );
     let version = nizaam_indexing::IndexVersionId::new("v1").expect("version id should be valid");
 
-    let response = IndexEventResponse::with_version(id, version.clone())
-        .with_technical_result("logical index assignment completed");
+    let response =
+        IndexEventResponse::with_version(event.clone(), assigned_id.clone(), version.clone())
+            .with_technical_result("logical index assignment completed");
 
-    assert_eq!(response.index_id(), &id);
+    assert_eq!(response.event(), &event);
+    assert_eq!(response.assigned_id(), &assigned_id);
     assert_eq!(response.version(), Some(&version));
     assert_eq!(
         response.technical_result(),
@@ -265,16 +279,25 @@ fn response_can_carry_optional_logical_version_and_technical_result() {
 }
 
 #[test]
-fn response_consumption_returns_the_logical_index_id_only() {
-    let id = index_id(0x33);
-    let response = IndexEventResponse::new(id);
+fn response_consumption_returns_the_assigned_entity_id_only() {
+    let event = logical_event(None);
+    let assigned_id = IndexAssignedId::generate(
+        &TargetReferenceType::new("source.object").expect("target reference type should be valid"),
+        event.object_reference(),
+    );
+    let response = IndexEventResponse::new(event, assigned_id.clone());
 
-    assert_eq!(response.into_index_id(), id);
+    assert_eq!(response.into_assigned_id(), assigned_id);
 }
 
 #[test]
 fn response_content_does_not_duplicate_core_transport_or_correlation_metadata() {
-    let response = IndexEventResponse::new(index_id(0x44));
+    let event = logical_event(None);
+    let assigned_id = IndexAssignedId::generate(
+        &TargetReferenceType::new("source.object").expect("target reference type should be valid"),
+        event.object_reference(),
+    );
+    let response = IndexEventResponse::new(event, assigned_id);
 
     // The response value itself contains only Indexing-owned result content.
     // Event/message identity, operation/correlation, transport, cancellation,
@@ -286,7 +309,11 @@ fn response_content_does_not_duplicate_core_transport_or_correlation_metadata() 
 #[test]
 fn event_and_response_use_different_protocol_roles() {
     let event = logical_event(None);
-    let response = IndexEventResponse::new(index_id(0x55));
+    let assigned_id = IndexAssignedId::generate(
+        &TargetReferenceType::new("source.object").expect("target reference type should be valid"),
+        event.object_reference(),
+    );
+    let response = IndexEventResponse::new(event.clone(), assigned_id.clone());
 
     assert_eq!(
         event
@@ -297,5 +324,6 @@ fn event_and_response_use_different_protocol_roles() {
             .interaction,
         Interaction::Request
     );
-    assert_eq!(response.index_id(), &index_id(0x55));
+    assert_eq!(response.event(), &event);
+    assert_eq!(response.assigned_id(), &assigned_id);
 }

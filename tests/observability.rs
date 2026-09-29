@@ -39,7 +39,7 @@ use nizaam_core::{
 };
 
 use nizaam_indexing::{
-    event::IndexEvent,
+    event::{EntityType, IndexEvent},
     identity::IndexNamespace,
     index::{
         ConsistencyRequirement, IndexFamily, KeyDefinition, KeyMaterial, ObjectReference,
@@ -348,6 +348,7 @@ fn diagnostics_can_carry_indexing_context_without_replacing_core_error_semantics
 fn typed_index_event_remains_core_universal_request_content() {
     let event = IndexEvent::new(
         universal_request(),
+        EntityType::new("semantic").expect("entity type must be valid"),
         index_requirement(),
         ObjectReference::new("nizaam.test.sender", "object:1")
             .expect("object reference must be valid"),
