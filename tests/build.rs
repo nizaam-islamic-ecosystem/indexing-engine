@@ -10,17 +10,20 @@ use nizaam_indexing::build::{
     CandidateUpdater, IndexBuilder, IndexMutation, IndexPublisher, IndexRebuilder, RebuildError,
     UpdateError, UpdateJournal, UpdateSequence,
 };
-use nizaam_indexing::identity::{
-    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
-};
+use nizaam_indexing::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion, IndexVersionId,
     IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
     TargetReferenceType, Uniqueness, VersionLifecycle,
 };
 
-fn index_id(seed: u8) -> IndexId {
-    IndexId::from_bytes([seed; 64])
+fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
+    IndexDefinitionIdentity::new(
+        IndexDefinitionId::new(format!("phase3.build.documents.{seed}"))
+            .expect("definition ID should be valid"),
+        IndexNamespace::new(format!("phase3.build.{seed}")).expect("namespace should be valid"),
+        IndexFamily::Inverted,
+    )
 }
 
 fn version_id(value: &str) -> IndexVersionId {
@@ -35,14 +38,9 @@ fn schema_version(value: &str) -> SchemaVersion {
     SchemaVersion::new(value).expect("test schema version should be valid")
 }
 
-fn definition(uniqueness: Uniqueness) -> IndexDefinition {
+fn definition(seed: u8, uniqueness: Uniqueness) -> IndexDefinition {
     IndexDefinition::new(
-        IndexDefinitionIdentity::new(
-            IndexDefinitionId::new("phase3.build.documents")
-                .expect("definition ID should be valid"),
-            IndexNamespace::new("phase3.build").expect("namespace should be valid"),
-            IndexFamily::Inverted,
-        ),
+        definition_identity(seed),
         KeyDefinition::new(["term"]).expect("key definition should be valid"),
         TargetReferenceType::new("documents.document")
             .expect("target reference type should be valid"),
@@ -76,8 +74,8 @@ fn ready_state(candidate: &BuildCandidate) -> IndexVersionState {
 fn build_candidate(seed: u8, version: &str, entries: Vec<IndexEntry>) -> BuildCandidate {
     IndexBuilder::new()
         .build(BuildInput::new(
-            index_id(seed),
-            definition(Uniqueness::NonUnique),
+            definition_identity(seed),
+            definition(seed, Uniqueness::NonUnique),
             version_id(version),
             BuildSnapshot::with_versions(
                 Some(source_version("source-v1")),
@@ -96,7 +94,7 @@ fn build_pipeline_constructs_and_populates_an_unpublished_candidate() {
         vec![entry("alpha", "doc:1"), entry("beta", "doc:2")],
     );
 
-    assert_eq!(candidate.index_id(), &index_id(0x11));
+    assert_eq!(candidate.definition_identity(), &definition_identity(0x11));
     assert_eq!(candidate.version().id().as_str(), "index-v1");
     assert_eq!(candidate.len(), 2);
     assert_eq!(candidate.entries()[0].key(), &KeyMaterial::text("alpha"));
@@ -234,8 +232,8 @@ fn rebuild_captures_a_boundary_replays_newer_updates_and_stops_at_a_consistency_
     let progress = rebuilder
         .start(
             nizaam_indexing::build::RebuildInput::new(
-                index_id(0x55),
-                definition(Uniqueness::NonUnique),
+                definition_identity(0x55),
+                definition(0x55, Uniqueness::NonUnique),
                 version_id("index-v2"),
                 BuildSnapshot::with_versions(
                     Some(source_version("source-v1")),
@@ -282,8 +280,8 @@ fn rebuild_refuses_to_finish_while_the_journal_is_ahead() {
     let progress = rebuilder
         .start(
             nizaam_indexing::build::RebuildInput::new(
-                index_id(0x66),
-                definition(Uniqueness::NonUnique),
+                definition_identity(0x66),
+                definition(0x66, Uniqueness::NonUnique),
                 version_id("index-v2"),
                 BuildSnapshot::with_versions(
                     Some(source_version("source-v1")),

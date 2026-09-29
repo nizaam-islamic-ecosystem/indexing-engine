@@ -25,7 +25,8 @@ use nizaam_core::identity::{
 use nizaam_core::operation::{Operation, OperationContext};
 use nizaam_core::status::Status;
 
-use nizaam_indexing::{IndexingEngine, IndexingRegistration};
+use nizaam_indexing::IndexingRegistration;
+use nizaam_indexing::engine::{EngineSetupError, IndexingEngine};
 
 /// Stable logical engine identity used by repository-level tests.
 pub const TEST_ENGINE_ID: &str = "nizaam.indexing.test";
@@ -95,7 +96,7 @@ pub fn registration_fixture(engine: &IndexingEngine) -> IndexingRegistration {
 pub fn register_engine(
     engine: &IndexingEngine,
     registry: &EngineRegistry,
-) -> Result<(), nizaam_indexing::engine::EngineSetupError> {
+) -> Result<(), EngineSetupError> {
     engine.register_engine(registry)
 }
 

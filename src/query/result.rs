@@ -23,7 +23,7 @@
 use core::fmt;
 
 use crate::consistency::policy::ConsistencyMode;
-use crate::identity::IndexId;
+use crate::identity::IndexDefinitionIdentity;
 use crate::index::{
     IndexVersion, IndexVersionValidationError, KeyMaterial, KeyMaterialValidationError,
     ObjectReference,
@@ -372,7 +372,7 @@ impl QueryHit {
 /// retrieval layer. This type does not implement pagination algorithms.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryResult {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     index_version: IndexVersion,
     hits: Vec<QueryHit>,
     continuation: Option<Vec<u8>>,
@@ -386,43 +386,49 @@ impl QueryResult {
     /// should use a consistency-aware constructor once the consistency policy
     /// has been evaluated.
     pub fn new(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         index_version: IndexVersion,
         hits: Vec<QueryHit>,
     ) -> Result<Self, QueryResultValidationError> {
-        Self::with_all(index_id, index_version, hits, None, None)
+        Self::with_all(definition_identity, index_version, hits, None, None)
     }
 
     /// Constructs a result with opaque continuation information.
     pub fn with_continuation(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         index_version: IndexVersion,
         hits: Vec<QueryHit>,
         continuation: Option<Vec<u8>>,
     ) -> Result<Self, QueryResultValidationError> {
-        Self::with_all(index_id, index_version, hits, continuation, None)
+        Self::with_all(definition_identity, index_version, hits, continuation, None)
     }
 
     /// Constructs a result with query-time consistency metadata.
     pub fn with_consistency(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         index_version: IndexVersion,
         hits: Vec<QueryHit>,
         consistency: ConsistencyMetadata,
     ) -> Result<Self, QueryResultValidationError> {
-        Self::with_all(index_id, index_version, hits, None, Some(consistency))
+        Self::with_all(
+            definition_identity,
+            index_version,
+            hits,
+            None,
+            Some(consistency),
+        )
     }
 
     /// Constructs the complete result representation.
     pub fn with_continuation_and_consistency(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         index_version: IndexVersion,
         hits: Vec<QueryHit>,
         continuation: Option<Vec<u8>>,
         consistency: ConsistencyMetadata,
     ) -> Result<Self, QueryResultValidationError> {
         Self::with_all(
-            index_id,
+            definition_identity,
             index_version,
             hits,
             continuation,
@@ -431,14 +437,14 @@ impl QueryResult {
     }
 
     fn with_all(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         index_version: IndexVersion,
         hits: Vec<QueryHit>,
         continuation: Option<Vec<u8>>,
         consistency: Option<ConsistencyMetadata>,
     ) -> Result<Self, QueryResultValidationError> {
         let result = Self {
-            index_id,
+            definition_identity,
             index_version,
             hits,
             continuation,
@@ -449,10 +455,10 @@ impl QueryResult {
         Ok(result)
     }
 
-    /// Returns the concrete logical index identity queried.
+    /// Returns the concrete logical definition identity queried.
     #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the exact logical index version associated with this result.
@@ -510,9 +516,16 @@ impl QueryResult {
     /// tuple. Use [`QueryResult::into_parts_with_consistency`] when the Phase 4
     /// metadata is required.
     #[must_use]
-    pub fn into_parts(self) -> (IndexId, IndexVersion, Vec<QueryHit>, Option<Vec<u8>>) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        IndexDefinitionIdentity,
+        IndexVersion,
+        Vec<QueryHit>,
+        Option<Vec<u8>>,
+    ) {
         (
-            self.index_id,
+            self.definition_identity,
             self.index_version,
             self.hits,
             self.continuation,
@@ -524,14 +537,14 @@ impl QueryResult {
     pub fn into_parts_with_consistency(
         self,
     ) -> (
-        IndexId,
+        IndexDefinitionIdentity,
         IndexVersion,
         Vec<QueryHit>,
         Option<Vec<u8>>,
         Option<ConsistencyMetadata>,
     ) {
         (
-            self.index_id,
+            self.definition_identity,
             self.index_version,
             self.hits,
             self.continuation,
@@ -636,11 +649,18 @@ fn validate_metric(value: Option<f64>, kind: MetricKind) -> Result<(), QueryHitV
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::index::INDEX_ID_BYTE_LEN;
+    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
+    use crate::index::IndexFamily;
     use crate::index::{IndexVersionId, SourceVersion};
 
-    fn index_id(byte: u8) -> IndexId {
-        IndexId::from_bytes([byte; INDEX_ID_BYTE_LEN])
+    fn definition_identity(byte: u8) -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            IndexDefinitionId::new(format!("query.result.definition.{byte}"))
+                .expect("definition ID should be valid"),
+            IndexNamespace::new(format!("query.result.namespace.{byte}"))
+                .expect("namespace should be valid"),
+            IndexFamily::Inverted,
+        )
     }
 
     fn version(byte: u8) -> IndexVersion {
@@ -690,10 +710,14 @@ mod tests {
 
     #[test]
     fn query_result_preserves_index_version_and_hits() {
-        let result = QueryResult::new(index_id(0x11), version(1), vec![QueryHit::new(reference())])
-            .expect("result should be valid");
+        let result = QueryResult::new(
+            definition_identity(0x11),
+            version(1),
+            vec![QueryHit::new(reference())],
+        )
+        .expect("result should be valid");
 
-        assert_eq!(result.index_id().as_bytes(), &[0x11; INDEX_ID_BYTE_LEN]);
+        assert_eq!(result.definition_identity(), &definition_identity(0x11));
         assert_eq!(result.index_version().id().as_str(), "index-version-1");
         assert_eq!(result.hits().len(), 1);
         assert_eq!(result.hits()[0].reference().object_reference(), "verse:1:1");
@@ -704,7 +728,7 @@ mod tests {
     #[test]
     fn query_result_supports_opaque_continuation() {
         let result = QueryResult::with_continuation(
-            index_id(0x22),
+            definition_identity(0x22),
             version(2),
             vec![QueryHit::new(reference())],
             Some(vec![1, 2, 3, 4]),
@@ -716,7 +740,7 @@ mod tests {
 
     #[test]
     fn query_result_allows_an_empty_successful_hit_list() {
-        let result = QueryResult::new(index_id(0x33), version(3), Vec::new())
+        let result = QueryResult::new(definition_identity(0x33), version(3), Vec::new())
             .expect("empty result should be valid");
 
         assert!(result.hits().is_empty());
@@ -737,7 +761,7 @@ mod tests {
         .expect("consistency metadata should be valid");
 
         let result = QueryResult::with_consistency(
-            index_id(0x44),
+            definition_identity(0x44),
             version(4),
             vec![QueryHit::new(reference())],
             metadata,
@@ -853,7 +877,7 @@ mod tests {
         };
 
         let result = QueryResult {
-            index_id: index_id(0x55),
+            definition_identity: definition_identity(0x55),
             index_version: version(5),
             hits: vec![hit],
             continuation: None,
@@ -886,7 +910,7 @@ mod tests {
         .expect("metadata should be valid");
 
         let result = QueryResult::with_continuation_and_consistency(
-            index_id(0x66),
+            definition_identity(0x66),
             version(6),
             vec![QueryHit::new(reference())],
             Some(vec![8, 7, 6]),
@@ -894,10 +918,13 @@ mod tests {
         )
         .expect("result should be valid");
 
-        let (index_id, version, hits, continuation, consistency) =
+        let (definition_identity, version, hits, continuation, consistency) =
             result.into_parts_with_consistency();
 
-        assert_eq!(index_id.as_bytes(), &[0x66; INDEX_ID_BYTE_LEN]);
+        assert_eq!(
+            definition_identity.definition_id().as_str(),
+            "query.result.definition.102"
+        );
         assert_eq!(version.id().as_str(), "index-version-6");
         assert_eq!(hits.len(), 1);
         assert_eq!(continuation, Some(vec![8, 7, 6]));
@@ -906,12 +933,19 @@ mod tests {
 
     #[test]
     fn legacy_into_parts_keeps_phase_2_shape() {
-        let result = QueryResult::new(index_id(0x77), version(7), vec![QueryHit::new(reference())])
-            .expect("result should be valid");
+        let result = QueryResult::new(
+            definition_identity(0x77),
+            version(7),
+            vec![QueryHit::new(reference())],
+        )
+        .expect("result should be valid");
 
-        let (index_id, version, hits, continuation) = result.into_parts();
+        let (definition_identity, version, hits, continuation) = result.into_parts();
 
-        assert_eq!(index_id.as_bytes(), &[0x77; INDEX_ID_BYTE_LEN]);
+        assert_eq!(
+            definition_identity.definition_id().as_str(),
+            "query.result.definition.119"
+        );
         assert_eq!(version.id().as_str(), "index-version-7");
         assert_eq!(hits.len(), 1);
         assert!(continuation.is_none());

@@ -48,7 +48,7 @@
 //!
 //! # Important result-model boundary
 //!
-//! `QueryResult` currently contains one logical `IndexId` and one
+//! `QueryResult` currently contains one logical definition identity and one
 //! `IndexVersion`. Consequently, the execution layer can faithfully construct
 //! hybrid results when all components share one logical target/version. A
 //! heterogeneous hybrid plan containing multiple logical targets cannot be
@@ -81,7 +81,7 @@ use super::result::{
     QueryHitValidationError, QueryResult, QueryResultValidationError,
 };
 use crate::consistency::policy::{ConsistencyEvaluation, ConsistencyEvaluationState};
-use crate::identity::IndexId;
+use crate::identity::IndexDefinitionIdentity;
 use crate::index::IndexVersion;
 use crate::provider::ranking::{RankingCandidate, RankingCandidateValidationError};
 use crate::provider::{
@@ -192,7 +192,7 @@ pub enum RetrievalPlanValidationError {
     /// A single-index plan references a non-published version.
     UnqueryableTarget {
         /// Logical index associated with the invalid target.
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         /// Lifecycle observed on the plan target.
         lifecycle: crate::index::VersionLifecycle,
     },
@@ -215,9 +215,9 @@ pub enum RetrievalPlanValidationError {
 impl fmt::Display for RetrievalPlanValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnqueryableTarget { index_id, lifecycle } => write!(
+            Self::UnqueryableTarget { definition_identity, lifecycle } => write!(
                 formatter,
-                "retrieval plan targets logical index {index_id:?} at non-queryable lifecycle {lifecycle:?}"
+                "retrieval plan targets logical index {definition_identity:?} at non-queryable lifecycle {lifecycle:?}"
             ),
             Self::EmptyHybridPlan => {
                 formatter.write_str("hybrid retrieval plan contains no components")
@@ -231,7 +231,7 @@ impl fmt::Display for RetrievalPlanValidationError {
                 "hybrid retrieval plan has an unsupported capability resolution: {resolution:?}"
             ),
             Self::HeterogeneousHybridResultTargets => formatter.write_str(
-                "hybrid retrieval targets multiple logical index/version pairs that cannot be represented by the current single-target QueryResult contract",
+                "hybrid retrieval targets multiple logical definition/version pairs that cannot be represented by the current single-target QueryResult contract",
             ),
         }
     }
@@ -415,7 +415,7 @@ where
                 .map_err(RetrievalError::Provider)?;
 
             build_single_result(
-                plan.context().target().index_id(),
+                plan.context().target().definition_identity(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
                 plan.context().result_mode(),
@@ -431,7 +431,7 @@ where
                 .map_err(RetrievalError::Provider)?;
 
             build_single_result(
-                plan.context().target().index_id(),
+                plan.context().target().definition_identity(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
                 plan.context().result_mode(),
@@ -447,7 +447,7 @@ where
                 .map_err(RetrievalError::Provider)?;
 
             build_single_result(
-                plan.context().target().index_id(),
+                plan.context().target().definition_identity(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
                 plan.context().result_mode(),
@@ -463,7 +463,7 @@ where
                 .map_err(RetrievalError::Provider)?;
 
             build_single_result(
-                plan.context().target().index_id(),
+                plan.context().target().definition_identity(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
                 plan.context().result_mode(),
@@ -479,7 +479,7 @@ where
                 .map_err(RetrievalError::Provider)?;
 
             build_single_result(
-                plan.context().target().index_id(),
+                plan.context().target().definition_identity(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
                 plan.context().result_mode(),
@@ -495,7 +495,7 @@ where
                 .map_err(RetrievalError::Provider)?;
 
             build_single_result(
-                plan.context().target().index_id(),
+                plan.context().target().definition_identity(),
                 plan.context().target().version(),
                 plan.context().target().consistency(),
                 plan.context().result_mode(),
@@ -536,7 +536,7 @@ pub fn validate_plan(plan: &RetrievalPlan) -> Result<(), RetrievalPlanValidation
             for component in plan.components() {
                 if component.target().lifecycle() != crate::index::VersionLifecycle::Published {
                     return Err(RetrievalPlanValidationError::UnqueryableTarget {
-                        index_id: *component.target().index_id(),
+                        definition_identity: component.target().definition_identity().clone(),
                         lifecycle: component.target().lifecycle(),
                     });
                 }
@@ -560,7 +560,7 @@ fn validate_published_target(
 ) -> Result<(), RetrievalPlanValidationError> {
     if target.lifecycle() != crate::index::VersionLifecycle::Published {
         return Err(RetrievalPlanValidationError::UnqueryableTarget {
-            index_id: *target.index_id(),
+            definition_identity: target.definition_identity().clone(),
             lifecycle: target.lifecycle(),
         });
     }
@@ -626,7 +626,7 @@ where
 }
 
 fn build_single_result(
-    index_id: &IndexId,
+    definition_identity: &IndexDefinitionIdentity,
     version: &IndexVersion,
     consistency: &ConsistencyEvaluation,
     result_mode: ResultMode,
@@ -639,7 +639,7 @@ fn build_single_result(
 
     let metadata = consistency_metadata(consistency)?;
 
-    QueryResult::with_consistency(*index_id, version.clone(), hits, metadata)
+    QueryResult::with_consistency(definition_identity.clone(), version.clone(), hits, metadata)
         .map_err(RetrievalResultError::InvalidResult)
 }
 
@@ -650,7 +650,7 @@ fn hybrid_targets_are_homogeneous(plan: &HybridRetrievalPlan) -> bool {
 
     let first_target = first.target();
     plan.components().iter().all(|component| {
-        component.target().index_id() == first_target.index_id()
+        component.target().definition_identity() == first_target.definition_identity()
             && component.target().version() == first_target.version()
     })
 }
@@ -673,7 +673,7 @@ fn build_hybrid_result(
     let consistency = consistency_metadata(first_target.consistency())?;
 
     QueryResult::with_consistency(
-        *first_target.index_id(),
+        first_target.definition_identity().clone(),
         first_target.version().clone(),
         hits,
         consistency,
@@ -815,7 +815,7 @@ mod tests {
     use super::super::request::{AtomicQuery, HybridQueryComponent, QueryKind, QueryRequest};
     use crate::consistency::policy::{ConsistencyMode, FreshnessPolicy};
     use crate::consistency::synchronization::SynchronizationSnapshot;
-    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace};
+    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
     use crate::index::{
         ConsistencyRequirement, IndexDefinition, IndexFamily, IndexVersion, IndexVersionId,
         IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion,
@@ -1095,10 +1095,6 @@ mod tests {
         ))
     }
 
-    fn index_id(seed: u8) -> IndexId {
-        IndexId::from_bytes([seed; crate::identity::index::INDEX_ID_BYTE_LEN])
-    }
-
     fn definition(family: IndexFamily, definition_value: &str) -> IndexDefinition {
         IndexDefinition::new(
             IndexDefinitionIdentity::new(
@@ -1139,7 +1135,7 @@ mod tests {
     }
 
     fn candidate(
-        seed: u8,
+        _seed: u8,
         family: IndexFamily,
         definition_value: &str,
         version: &str,
@@ -1153,7 +1149,11 @@ mod tests {
         .expect("synchronization should be valid");
 
         IndexCandidate::new(
-            index_id(seed),
+            IndexDefinitionIdentity::new(
+                IndexDefinitionId::new(definition_value).expect("definition ID should be valid"),
+                IndexNamespace::new("retrieval.level2").expect("namespace should be valid"),
+                family,
+            ),
             definition(family, definition_value),
             published_state(version),
             synchronization,
@@ -1178,8 +1178,11 @@ mod tests {
             10,
         );
 
-        let request = QueryRequest::exact(*selected.index_id(), KeyMaterial::text("lookup"))
-            .expect("exact request should be valid");
+        let request = QueryRequest::exact(
+            selected.definition_identity().clone(),
+            KeyMaterial::text("lookup"),
+        )
+        .expect("exact request should be valid");
 
         crate::query::planner::plan_query(
             &request,
@@ -1201,7 +1204,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Similarity {
                 representation: KeyMaterial::bytes(vec![1, 2, 3]),
                 parameters: None,
@@ -1359,14 +1362,17 @@ mod tests {
             10,
         );
 
-        let request = QueryRequest::exact(*selected.index_id(), KeyMaterial::text("lookup"))
-            .expect("exact request should be valid");
+        let request = QueryRequest::exact(
+            selected.definition_identity().clone(),
+            KeyMaterial::text("lookup"),
+        )
+        .expect("exact request should be valid");
 
         let building = IndexVersionState::new(selected.version().version().clone());
         assert_eq!(building.lifecycle(), VersionLifecycle::Building);
 
         let invalid_candidate = IndexCandidate::new(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             selected.definition().clone(),
             building,
             selected.synchronization().clone(),
@@ -1404,7 +1410,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Exact {
                 key: KeyMaterial::text("lookup"),
             },
@@ -1454,9 +1460,11 @@ mod tests {
             10,
             10,
         );
-        let text_request =
-            QueryRequest::text(*text_candidate.index_id(), KeyMaterial::text("rust"))
-                .expect("text request should be valid");
+        let text_request = QueryRequest::text(
+            text_candidate.definition_identity().clone(),
+            KeyMaterial::text("rust"),
+        )
+        .expect("text request should be valid");
 
         let structured_candidate = candidate(
             8,
@@ -1467,7 +1475,7 @@ mod tests {
             10,
         );
         let structured_request = QueryRequest::structured(
-            *structured_candidate.index_id(),
+            structured_candidate.definition_identity().clone(),
             KeyMaterial::map([("field", KeyMaterial::text("value"))])
                 .expect("structured material should be valid"),
         )
@@ -1482,9 +1490,11 @@ mod tests {
             10,
             10,
         );
-        let neighborhood_request =
-            QueryRequest::neighborhood(*neighborhood_candidate.index_id(), anchor)
-                .expect("neighborhood request should be valid");
+        let neighborhood_request = QueryRequest::neighborhood(
+            neighborhood_candidate.definition_identity().clone(),
+            anchor,
+        )
+        .expect("neighborhood request should be valid");
 
         let provider = FakeProvider::new(
             capabilities_for(&[
@@ -1576,7 +1586,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Filtered {
                 base: AtomicQuery::Text {
                     query: KeyMaterial::text("rust"),
@@ -1636,7 +1646,7 @@ mod tests {
         );
 
         let request = QueryRequest::hybrid(
-            *candidate.index_id(),
+            candidate.definition_identity().clone(),
             vec![
                 HybridQueryComponent::new(AtomicQuery::Text {
                     query: KeyMaterial::text("rust"),
@@ -1696,7 +1706,7 @@ mod tests {
         );
 
         let request = QueryRequest::hybrid(
-            *first.index_id(),
+            first.definition_identity().clone(),
             vec![
                 HybridQueryComponent::new(AtomicQuery::Text {
                     query: KeyMaterial::text("rust"),
@@ -1704,7 +1714,7 @@ mod tests {
                 })
                 .expect("text component should be valid"),
                 HybridQueryComponent::with_options(
-                    Some(*second.index_id()),
+                    Some(second.definition_identity().clone()),
                     AtomicQuery::Exact {
                         key: KeyMaterial::text("book"),
                     },
@@ -1759,7 +1769,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Hybrid {
                 components: vec![
                     HybridQueryComponent::new(AtomicQuery::Text {
@@ -1828,7 +1838,7 @@ mod tests {
         );
 
         let request = QueryRequest::hybrid(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             vec![
                 HybridQueryComponent::new(AtomicQuery::Text {
                     query: KeyMaterial::text("rust"),
@@ -1887,7 +1897,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Exact {
                 key: KeyMaterial::text("lookup"),
             },
@@ -1950,7 +1960,7 @@ mod tests {
         );
 
         let request = QueryRequest::with_query_options(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             QueryKind::Text {
                 query: KeyMaterial::text("rust"),
                 parameters: None,
@@ -1980,7 +1990,7 @@ mod tests {
         );
 
         let selected = IndexCandidate::new(
-            *selected.index_id(),
+            selected.definition_identity().clone(),
             selected.definition().clone(),
             selected.version().clone(),
             synchronization,
@@ -2056,8 +2066,11 @@ mod tests {
             20,
         );
 
-        let request = QueryRequest::exact(*selected.index_id(), KeyMaterial::text("lookup"))
-            .expect("exact request should be valid");
+        let request = QueryRequest::exact(
+            selected.definition_identity().clone(),
+            KeyMaterial::text("lookup"),
+        )
+        .expect("exact request should be valid");
 
         let capabilities = capabilities_for(&[ProviderCapability::ExactLookup]);
 

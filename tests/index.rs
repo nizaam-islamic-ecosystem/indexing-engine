@@ -24,6 +24,16 @@ fn index_id(seed: u8) -> IndexId {
     IndexId::from_bytes([seed; 64])
 }
 
+fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
+    IndexDefinitionIdentity::new(
+        IndexDefinitionId::new(format!("phase2.query.definition.{seed}"))
+            .expect("test definition ID should be valid"),
+        IndexNamespace::new(format!("phase2.query.{seed}"))
+            .expect("test namespace should be valid"),
+        IndexFamily::Inverted,
+    )
+}
+
 fn namespace(value: &str) -> IndexNamespace {
     IndexNamespace::new(value).expect("test namespace must be valid")
 }
@@ -283,7 +293,7 @@ fn index_version_composes_with_logical_definition_metadata() {
 #[test]
 fn logical_query_request_remains_provider_neutral() {
     let request = QueryRequest::with_options(
-        index_id(0x22),
+        definition_identity(0x22),
         KeyMaterial::map([("term", KeyMaterial::text("bismillah"))])
             .expect("query key material should be valid"),
         NonZeroUsize::new(10),
@@ -291,7 +301,7 @@ fn logical_query_request_remains_provider_neutral() {
     )
     .expect("logical query request should be valid");
 
-    assert_eq!(request.index_id().as_bytes(), &[0x22; 64]);
+    assert_eq!(request.definition_identity(), &definition_identity(0x22));
     assert_eq!(request.limit(), NonZeroUsize::new(10));
     assert!(matches!(request.query(), KeyMaterial::Map(_)));
     assert_eq!(
@@ -309,11 +319,15 @@ fn query_result_is_reference_only_and_carries_index_version() {
         .with_metrics(Some(0.95), Some(0.10))
         .expect("logical retrieval metrics should be valid");
 
-    let result =
-        QueryResult::with_continuation(index_id(0x33), version, vec![hit], Some(vec![1, 2, 3]))
-            .expect("query result should be valid");
+    let result = QueryResult::with_continuation(
+        definition_identity(0x33),
+        version,
+        vec![hit],
+        Some(vec![1, 2, 3]),
+    )
+    .expect("query result should be valid");
 
-    assert_eq!(result.index_id().as_bytes(), &[0x33; 64]);
+    assert_eq!(result.definition_identity(), &definition_identity(0x33));
     assert_eq!(result.index_version().id().as_str(), "documents.index-v2");
     assert_eq!(result.hits().len(), 1);
     assert_eq!(result.hits()[0].reference(), &reference);
@@ -326,7 +340,7 @@ fn query_result_is_reference_only_and_carries_index_version() {
 #[test]
 fn query_result_does_not_hydrate_domain_objects() {
     let result = QueryResult::new(
-        index_id(0x44),
+        definition_identity(0x44),
         index_version("documents.index-v3"),
         vec![QueryHit::new(object_reference("documents", "document:99"))],
     )
@@ -365,7 +379,7 @@ fn domain_and_provider_specific_types_are_not_required_by_the_phase_two_model() 
     )
     .expect("entry should be valid");
     let version = index_version("documents.index-v4");
-    let request = QueryRequest::new(index_id(0x55), KeyMaterial::text("term"))
+    let request = QueryRequest::new(definition_identity(0x55), KeyMaterial::text("term"))
         .expect("request should be valid");
 
     assert_eq!(definition.family(), IndexFamily::Inverted);

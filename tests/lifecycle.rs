@@ -4,14 +4,23 @@
 //! downstream consumer. They intentionally keep index lifecycle state
 //! separate from the Core-backed engine runtime lifecycle.
 
-use nizaam_indexing::{INDEX_ID_BYTE_LEN, IndexId, IndexLifecycle, IndexLifecycleState};
+use nizaam_indexing::{
+    IndexDefinitionId, IndexDefinitionIdentity, IndexFamily, IndexLifecycle, IndexLifecycleState,
+    IndexNamespace,
+};
 
-fn index_id(seed: u8) -> IndexId {
-    IndexId::from_bytes([seed; INDEX_ID_BYTE_LEN])
+fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
+    IndexDefinitionIdentity::new(
+        IndexDefinitionId::new(format!("phase5.lifecycle.{seed}"))
+            .expect("test definition ID should be valid"),
+        IndexNamespace::new(format!("phase5.lifecycle.{seed}"))
+            .expect("test namespace should be valid"),
+        IndexFamily::Identity,
+    )
 }
 
 fn active_lifecycle(seed: u8) -> IndexLifecycle {
-    let mut lifecycle = IndexLifecycle::new(index_id(seed));
+    let mut lifecycle = IndexLifecycle::new(definition_identity(seed));
 
     lifecycle
         .mark_building()
@@ -31,10 +40,10 @@ fn active_lifecycle(seed: u8) -> IndexLifecycle {
 
 #[test]
 fn new_index_has_creating_state_and_preserves_identity() {
-    let id = index_id(0x11);
-    let lifecycle = IndexLifecycle::new(id);
+    let id = definition_identity(0x11);
+    let lifecycle = IndexLifecycle::new(id.clone());
 
-    assert_eq!(lifecycle.index_id(), id);
+    assert_eq!(lifecycle.definition_identity(), &id);
     assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
     assert!(!lifecycle.is_active());
     assert!(!lifecycle.is_terminal());
@@ -80,7 +89,7 @@ fn controlled_retirement_is_allowed_before_activation() {
     ];
 
     for (seed, target) in states.into_iter().enumerate() {
-        let mut lifecycle = IndexLifecycle::new(index_id(0x30 + seed as u8));
+        let mut lifecycle = IndexLifecycle::new(definition_identity(0x30 + seed as u8));
 
         match target {
             IndexLifecycleState::Creating => {}
@@ -124,14 +133,14 @@ fn controlled_retirement_is_allowed_before_activation() {
 
 #[test]
 fn invalid_transition_is_rejected_without_mutating_state() {
-    let id = index_id(0x44);
-    let mut lifecycle = IndexLifecycle::new(id);
+    let id = definition_identity(0x44);
+    let mut lifecycle = IndexLifecycle::new(id.clone());
 
     let error = lifecycle
         .transition_to(IndexLifecycleState::Active)
         .expect_err("Creating -> Active must not bypass validation and readiness");
 
-    assert_eq!(error.index_id(), id);
+    assert_eq!(error.definition_identity(), &id);
     assert_eq!(error.from(), IndexLifecycleState::Creating);
     assert_eq!(error.to(), IndexLifecycleState::Active);
     assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
@@ -139,7 +148,7 @@ fn invalid_transition_is_rejected_without_mutating_state() {
 
 #[test]
 fn retired_state_is_terminal() {
-    let mut lifecycle = IndexLifecycle::new(index_id(0x55));
+    let mut lifecycle = IndexLifecycle::new(definition_identity(0x55));
 
     lifecycle
         .mark_retiring()
@@ -167,7 +176,7 @@ fn retired_state_is_terminal() {
 
 #[test]
 fn same_state_transitions_are_idempotent() {
-    let mut lifecycle = IndexLifecycle::new(index_id(0x66));
+    let mut lifecycle = IndexLifecycle::new(definition_identity(0x66));
 
     lifecycle
         .transition_to(IndexLifecycleState::Creating)
@@ -219,7 +228,7 @@ fn same_state_transitions_are_idempotent() {
 #[test]
 fn independent_indexes_keep_independent_lifecycle_state() {
     let mut first = active_lifecycle(0x71);
-    let second = IndexLifecycle::new(index_id(0x72));
+    let second = IndexLifecycle::new(definition_identity(0x72));
 
     first
         .mark_maintaining()
@@ -227,7 +236,7 @@ fn independent_indexes_keep_independent_lifecycle_state() {
 
     assert_eq!(first.state(), IndexLifecycleState::Maintaining);
     assert_eq!(second.state(), IndexLifecycleState::Creating);
-    assert_ne!(first.index_id(), second.index_id());
+    assert_ne!(first.definition_identity(), second.definition_identity());
 }
 
 #[test]

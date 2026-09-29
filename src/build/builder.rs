@@ -33,7 +33,7 @@
 
 use crate::consistency::versioning::{VersioningError, validate_candidate_compatibility};
 use crate::error::IndexingResult;
-use crate::identity::IndexId;
+use crate::identity::IndexDefinitionIdentity;
 use crate::index::{
     IndexDefinition, IndexEntry, IndexEntryValidationError, IndexVersion, IndexVersionId,
     IndexVersionValidationError, SchemaVersion, SourceVersion, Uniqueness,
@@ -139,12 +139,13 @@ impl BuildSnapshot {
 
 /// Input to the Indexing-local candidate construction workflow.
 ///
-/// `index_id` identifies the concrete logical index resource. It is supplied
-/// by the caller because `builder.rs` constructs an index version; it does not
-/// redefine the Phase 1/2 `IndexId` generation contract.
+/// `definition_identity` identifies the logical index definition/resource
+/// governed by the candidate. It is supplied by the caller because the
+/// builder constructs an index version; it does not generate an
+/// Index Assignment Operation ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildInput {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     definition: IndexDefinition,
     candidate_version_id: IndexVersionId,
     snapshot: BuildSnapshot,
@@ -155,23 +156,23 @@ impl BuildInput {
     /// candidate version identity, and source snapshot.
     #[must_use]
     pub fn new(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         definition: IndexDefinition,
         candidate_version_id: IndexVersionId,
         snapshot: BuildSnapshot,
     ) -> Self {
         Self {
-            index_id,
+            definition_identity,
             definition,
             candidate_version_id,
             snapshot,
         }
     }
 
-    /// Returns the logical index identity targeted by construction.
+    /// Returns the logical definition identity targeted by construction.
     #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the logical definition governing the candidate.
@@ -194,9 +195,16 @@ impl BuildInput {
 
     /// Consumes the input and returns all logical components.
     #[must_use]
-    pub fn into_parts(self) -> (IndexId, IndexDefinition, IndexVersionId, BuildSnapshot) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        IndexDefinitionIdentity,
+        IndexDefinition,
+        IndexVersionId,
+        BuildSnapshot,
+    ) {
         (
-            self.index_id,
+            self.definition_identity,
             self.definition,
             self.candidate_version_id,
             self.snapshot,
@@ -212,17 +220,17 @@ impl BuildInput {
 /// state, provider handles, storage resources, or publication authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildCandidate {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     definition: IndexDefinition,
     version: IndexVersion,
     entries: Vec<IndexEntry>,
 }
 
 impl BuildCandidate {
-    /// Returns the logical index identity represented by the candidate.
+    /// Returns the logical definition identity represented by the candidate.
     #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the logical index definition governing the candidate.
@@ -257,8 +265,20 @@ impl BuildCandidate {
 
     /// Consumes the candidate and returns all logical construction components.
     #[must_use]
-    pub fn into_parts(self) -> (IndexId, IndexDefinition, IndexVersion, Vec<IndexEntry>) {
-        (self.index_id, self.definition, self.version, self.entries)
+    pub fn into_parts(
+        self,
+    ) -> (
+        IndexDefinitionIdentity,
+        IndexDefinition,
+        IndexVersion,
+        Vec<IndexEntry>,
+    ) {
+        (
+            self.definition_identity,
+            self.definition,
+            self.version,
+            self.entries,
+        )
     }
 
     /// Reconstructs a candidate from already-owned logical components inside
@@ -268,13 +288,13 @@ impl BuildCandidate {
     /// own logical mutation rules. Validation remains explicit and must be
     /// performed before publication.
     pub(crate) fn from_parts(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         definition: IndexDefinition,
         version: IndexVersion,
         entries: Vec<IndexEntry>,
     ) -> Self {
         Self {
-            index_id,
+            definition_identity,
             definition,
             version,
             entries,
@@ -464,14 +484,15 @@ impl IndexBuilder {
     ///
     /// It does not publish the result or alter any active version.
     pub fn build(&self, input: BuildInput) -> Result<BuildCandidate, BuildError> {
-        let (index_id, definition, candidate_version_id, snapshot) = input.into_parts();
+        let (definition_identity, definition, candidate_version_id, snapshot) = input.into_parts();
         let (source_version, schema_version, entries) = snapshot.into_parts();
 
         let version =
             IndexVersion::with_metadata(candidate_version_id, source_version, schema_version, None)
                 .map_err(BuildError::InvalidVersion)?;
 
-        let candidate = BuildCandidate::from_parts(index_id, definition, version, entries);
+        let candidate =
+            BuildCandidate::from_parts(definition_identity, definition, version, entries);
 
         Self::validate(&candidate)?;
 
@@ -518,8 +539,16 @@ mod tests {
         TargetReferenceType, Uniqueness,
     };
 
-    fn index_id(seed: u8) -> IndexId {
-        IndexId::from_bytes([seed; 64])
+    fn definition_identity(
+        definition_id: &str,
+        namespace: &str,
+        family: IndexFamily,
+    ) -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            IndexDefinitionId::new(definition_id).expect("test definition ID should be valid"),
+            IndexNamespace::new(namespace).expect("test namespace should be valid"),
+            family,
+        )
     }
 
     fn version_id(value: &str) -> IndexVersionId {
@@ -585,12 +614,17 @@ mod tests {
     }
 
     fn input(
-        index: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         version: &str,
         definition: IndexDefinition,
         snapshot: BuildSnapshot,
     ) -> BuildInput {
-        BuildInput::new(index, definition, version_id(version), snapshot)
+        BuildInput::new(
+            definition_identity,
+            definition,
+            version_id(version),
+            snapshot,
+        )
     }
 
     #[test]
@@ -604,14 +638,17 @@ mod tests {
         let builder = IndexBuilder::new();
         let candidate = builder
             .build(input(
-                index_id(0x11),
+                definition_identity("documents.v1", "search.documents", IndexFamily::Inverted),
                 "index-v4",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
             ))
             .expect("valid logical candidate should build");
 
-        assert_eq!(candidate.index_id(), &index_id(0x11));
+        assert_eq!(
+            candidate.definition_identity(),
+            &definition_identity("documents.v1", "search.documents", IndexFamily::Inverted)
+        );
         assert_eq!(candidate.version().id().as_str(), "index-v4");
         assert_eq!(candidate.len(), 2);
         assert_eq!(candidate.entries()[0].key(), &KeyMaterial::text("alpha"));
@@ -628,7 +665,7 @@ mod tests {
 
         let candidate = IndexBuilder::new()
             .build(input(
-                index_id(0x22),
+                definition_identity("documents.v2", "search.documents", IndexFamily::Inverted),
                 "index-v9",
                 definition(Some("source-v8"), Some("schema-v5")),
                 snapshot,
@@ -659,7 +696,7 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                index_id(0x31),
+                definition_identity("documents.v31", "search.documents", IndexFamily::Inverted),
                 "index-unique",
                 definition_with_uniqueness(Uniqueness::Unique),
                 snapshot,
@@ -685,7 +722,7 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                index_id(0x33),
+                definition_identity("documents.v33", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
@@ -708,7 +745,7 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                index_id(0x44),
+                definition_identity("documents.v44", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
@@ -731,7 +768,7 @@ mod tests {
 
         let error = IndexBuilder::new()
             .build(input(
-                index_id(0x55),
+                definition_identity("documents.v55", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v3"), Some("schema-v2")),
                 snapshot,
@@ -751,7 +788,7 @@ mod tests {
 
         let candidate = IndexBuilder::new()
             .build(input(
-                index_id(0x66),
+                definition_identity("documents.v66", "search.documents", IndexFamily::Inverted),
                 "index-empty",
                 definition(None, None),
                 snapshot,
@@ -771,7 +808,7 @@ mod tests {
 
         let candidate = IndexBuilder::new()
             .build(input(
-                index_id(0x77),
+                definition_identity("documents.v77", "search.documents", IndexFamily::Inverted),
                 "index-order",
                 definition(None, None),
                 snapshot,
@@ -788,20 +825,21 @@ mod tests {
     }
 
     #[test]
-    fn build_does_not_regenerate_or_replace_the_supplied_index_identity() {
-        let supplied = index_id(0x88);
+    fn build_does_not_regenerate_or_replace_the_supplied_definition_identity() {
+        let supplied =
+            definition_identity("documents.v88", "search.documents", IndexFamily::Inverted);
         let snapshot = BuildSnapshot::new(Vec::<IndexEntry>::new());
 
         let candidate = IndexBuilder::new()
             .build(input(
-                supplied,
+                supplied.clone(),
                 "index-v1",
                 definition(None, None),
                 snapshot,
             ))
             .expect("candidate should build");
 
-        assert_eq!(candidate.index_id(), &supplied);
+        assert_eq!(candidate.definition_identity(), &supplied);
     }
 
     #[test]
@@ -814,7 +852,7 @@ mod tests {
 
         let candidate = IndexBuilder::new()
             .build(input(
-                index_id(0x99),
+                definition_identity("documents.v99", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(None, None),
                 snapshot,
@@ -828,7 +866,7 @@ mod tests {
     fn validation_is_repeatable_and_has_no_publication_effect() {
         let candidate = IndexBuilder::new()
             .build(input(
-                index_id(0xAA),
+                definition_identity("documents.vAA", "search.documents", IndexFamily::Inverted),
                 "index-v1",
                 definition(Some("source-v1"), Some("schema-v1")),
                 BuildSnapshot::with_versions(
@@ -849,18 +887,23 @@ mod tests {
 
     #[test]
     fn candidate_round_trip_preserves_all_components() {
-        let index = index_id(0xBB);
+        let definition_identity =
+            definition_identity("documents.vBB", "search.documents", IndexFamily::Inverted);
         let definition = definition(None, None);
         let version = IndexVersion::new(version_id("index-v2"));
         let entries = vec![entry("value", "doc:2")];
 
-        let candidate =
-            BuildCandidate::from_parts(index, definition.clone(), version.clone(), entries.clone());
+        let candidate = BuildCandidate::from_parts(
+            definition_identity.clone(),
+            definition.clone(),
+            version.clone(),
+            entries.clone(),
+        );
 
-        let (returned_index, returned_definition, returned_version, returned_entries) =
+        let (returned_definition_identity, returned_definition, returned_version, returned_entries) =
             candidate.into_parts();
 
-        assert_eq!(returned_index, index);
+        assert_eq!(returned_definition_identity, definition_identity);
         assert_eq!(returned_definition, definition);
         assert_eq!(returned_version, version);
         assert_eq!(returned_entries, entries);

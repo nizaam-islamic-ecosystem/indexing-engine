@@ -46,7 +46,7 @@ use super::builder::{BuildCandidate, BuildError, BuildInput, BuildSnapshot, Inde
 use super::update::{CandidateUpdater, UpdateError, UpdateJournal, UpdateSequence};
 use crate::consistency::versioning::{VersioningError, validate_active_version_compatibility};
 use crate::error::IndexingResult;
-use crate::identity::IndexId;
+use crate::identity::IndexDefinitionIdentity;
 use crate::index::{IndexDefinition, IndexVersionId};
 use core::fmt;
 use nizaam_core::contracts::Version as CoreVersion;
@@ -67,7 +67,7 @@ use std::error::Error;
 /// outside [`IndexVersion`], which remains the Phase 2 logical version value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RebuildInput {
-    index_id: IndexId,
+    definition_identity: IndexDefinitionIdentity,
     definition: IndexDefinition,
     candidate_version_id: IndexVersionId,
     snapshot: BuildSnapshot,
@@ -93,7 +93,7 @@ impl RebuildInput {
     /// same observation boundary as that snapshot.
     #[must_use]
     pub fn new(
-        index_id: IndexId,
+        definition_identity: IndexDefinitionIdentity,
         definition: IndexDefinition,
         candidate_version_id: IndexVersionId,
         snapshot: BuildSnapshot,
@@ -101,7 +101,7 @@ impl RebuildInput {
         active_version: Option<IndexVersionId>,
     ) -> Self {
         Self {
-            index_id,
+            definition_identity,
             definition,
             candidate_version_id,
             snapshot,
@@ -119,10 +119,10 @@ impl RebuildInput {
         self
     }
 
-    /// Returns the logical index identity targeted by the rebuild.
+    /// Returns the logical logical definition identity targeted by the rebuild.
     #[must_use]
-    pub fn index_id(&self) -> &IndexId {
-        &self.index_id
+    pub fn definition_identity(&self) -> &IndexDefinitionIdentity {
+        &self.definition_identity
     }
 
     /// Returns the logical definition governing the rebuild candidate.
@@ -166,7 +166,7 @@ impl RebuildInput {
     pub fn into_parts(
         self,
     ) -> (
-        IndexId,
+        IndexDefinitionIdentity,
         IndexDefinition,
         IndexVersionId,
         BuildSnapshot,
@@ -175,7 +175,7 @@ impl RebuildInput {
         Option<IndexVersionId>,
     ) {
         (
-            self.index_id,
+            self.definition_identity,
             self.definition,
             self.candidate_version_id,
             self.snapshot,
@@ -597,7 +597,7 @@ impl IndexRebuilder {
         }
 
         let build_input = BuildInput::new(
-            input.index_id,
+            input.definition_identity,
             input.definition,
             input.candidate_version_id,
             input.snapshot,
@@ -755,8 +755,13 @@ mod tests {
         ObjectReference, SchemaVersion, SourceVersion, TargetReferenceType, Uniqueness,
     };
 
-    fn index_id(seed: u8) -> IndexId {
-        IndexId::from_bytes([seed; 64])
+    fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            IndexDefinitionId::new(format!("documents.v{seed:02x}"))
+                .expect("test definition ID should be valid"),
+            IndexNamespace::new("search.documents").expect("test namespace should be valid"),
+            IndexFamily::Inverted,
+        )
     }
 
     fn version_id(value: &str) -> IndexVersionId {
@@ -805,7 +810,7 @@ mod tests {
         snapshot_entries: Vec<IndexEntry>,
     ) -> RebuildInput {
         RebuildInput::new(
-            index_id(0x55),
+            definition_identity(0x55),
             definition(Some("source-v1"), Some("schema-v1")),
             version_id("index-v2"),
             BuildSnapshot::with_versions(
@@ -839,7 +844,7 @@ mod tests {
         let progress = rebuilder
             .start(
                 RebuildInput::new(
-                    index_id(0x55),
+                    definition_identity(0x55),
                     definition(Some("source-v1"), Some("schema-v1")),
                     version_id("index-v2"),
                     snapshot,
@@ -894,7 +899,7 @@ mod tests {
             .expect("append should succeed");
 
         let input = RebuildInput::new(
-            index_id(0x55),
+            definition_identity(0x55),
             definition(Some("source-v1"), Some("schema-v1")),
             version_id("index-v2"),
             BuildSnapshot::with_versions(
@@ -946,7 +951,7 @@ mod tests {
     fn start_rejects_rebuild_that_targets_active_version() {
         let journal = UpdateJournal::new();
         let input = RebuildInput::new(
-            index_id(0x55),
+            definition_identity(0x55),
             definition(Some("source-v1"), Some("schema-v1")),
             version_id("index-v1"),
             BuildSnapshot::with_versions(
@@ -972,7 +977,7 @@ mod tests {
     fn start_allows_initial_rebuild_without_active_version() {
         let journal = UpdateJournal::new();
         let input = RebuildInput::new(
-            index_id(0x66),
+            definition_identity(0x66),
             definition(Some("source-v1"), Some("schema-v1")),
             version_id("index-v1"),
             BuildSnapshot::with_versions(

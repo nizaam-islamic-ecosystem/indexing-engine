@@ -13,9 +13,7 @@ use nizaam_indexing::build::{
     CandidateUpdater, IndexBuilder, IndexMutation, IndexPublisher, IndexRebuilder,
     PublicationError, RebuildError, RebuildInput, UpdateError, UpdateJournal,
 };
-use nizaam_indexing::identity::{
-    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
-};
+use nizaam_indexing::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersionId,
     IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
@@ -28,8 +26,13 @@ use nizaam_indexing::{
     RecoveryRequest, action_for, classify,
 };
 
-fn index_id(seed: u8) -> IndexId {
-    IndexId::from_bytes([seed; 64])
+fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
+    IndexDefinitionIdentity::new(
+        IndexDefinitionId::new(format!("phase3.faults.documents.{seed}"))
+            .expect("definition ID should be valid"),
+        IndexNamespace::new(format!("phase3.faults.{seed}")).expect("namespace should be valid"),
+        IndexFamily::Inverted,
+    )
 }
 
 fn version_id(value: &str) -> IndexVersionId {
@@ -44,14 +47,9 @@ fn schema_version(value: &str) -> SchemaVersion {
     SchemaVersion::new(value).expect("test schema version should be valid")
 }
 
-fn definition() -> IndexDefinition {
+fn definition(seed: u8) -> IndexDefinition {
     IndexDefinition::new(
-        IndexDefinitionIdentity::new(
-            IndexDefinitionId::new("phase3.faults.documents")
-                .expect("definition ID should be valid"),
-            IndexNamespace::new("phase3.faults").expect("namespace should be valid"),
-            IndexFamily::Inverted,
-        ),
+        definition_identity(seed),
         KeyDefinition::new(["term"]).expect("key definition should be valid"),
         TargetReferenceType::new("documents.document")
             .expect("target reference type should be valid"),
@@ -89,8 +87,8 @@ fn candidate(
 ) -> nizaam_indexing::build::BuildCandidate {
     IndexBuilder::new()
         .build(BuildInput::new(
-            index_id(seed),
-            definition(),
+            definition_identity(seed),
+            definition(seed),
             version_id(version),
             BuildSnapshot::with_versions(
                 Some(source_version("source-v1")),
@@ -105,8 +103,8 @@ fn candidate(
 fn build_fault_source_version_mismatch_does_not_produce_a_candidate() {
     let error = IndexBuilder::new()
         .build(BuildInput::new(
-            index_id(0x11),
-            definition(),
+            definition_identity(0x11),
+            definition(0x11),
             version_id("index-v1"),
             BuildSnapshot::with_versions(
                 Some(source_version("source-v2")),
@@ -210,8 +208,8 @@ fn replay_fault_leaves_the_previous_rebuild_progress_untouched() {
     let progress = rebuilder
         .start(
             RebuildInput::new(
-                index_id(0x55),
-                definition(),
+                definition_identity(0x55),
+                definition(0x55),
                 version_id("index-v2"),
                 BuildSnapshot::with_versions(
                     Some(source_version("source-v1")),
@@ -355,7 +353,6 @@ use nizaam_indexing::query::{
 };
 
 fn phase4_fault_candidate(
-    seed: u8,
     definition_name: &str,
     version: &str,
     source_sequence: u64,
@@ -404,7 +401,16 @@ fn phase4_fault_candidate(
     )
     .expect("synchronization should be valid");
 
-    IndexCandidate::new(index_id(seed), definition, state, synchronization)
+    IndexCandidate::new(
+        IndexDefinitionIdentity::new(
+            definition.definition_id().clone(),
+            definition.namespace().clone(),
+            definition.family(),
+        ),
+        definition,
+        state,
+        synchronization,
+    )
 }
 
 fn fault_operation_context() -> nizaam_core::operation::OperationContext {
@@ -543,15 +549,17 @@ impl ProviderRetriever for FaultProvider {
 #[test]
 fn phase4_provider_failure_is_preserved_and_is_not_converted_into_an_empty_result() {
     let candidate = phase4_fault_candidate(
-        0xa1,
         "phase4.faults.provider",
         "published-v1",
         10,
         10,
         VersionLifecycle::Published,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("term"),
+    )
+    .expect("request should be valid");
     let provider = FaultProvider::new(
         ProviderCapabilities::with(ProviderCapability::ExactLookup),
         ProviderAvailability::Available,
@@ -577,15 +585,17 @@ fn phase4_provider_failure_is_preserved_and_is_not_converted_into_an_empty_resul
 #[test]
 fn phase4_execution_rechecks_provider_availability_and_rejects_unavailable_provider() {
     let candidate = phase4_fault_candidate(
-        0xa2,
         "phase4.faults.availability",
         "published-v1",
         11,
         11,
         VersionLifecycle::Published,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("term"),
+    )
+    .expect("request should be valid");
     let planning_capabilities = ProviderCapabilities::with(ProviderCapability::ExactLookup);
     let plan = plan_query(
         &request,
@@ -614,15 +624,17 @@ fn phase4_execution_rechecks_provider_availability_and_rejects_unavailable_provi
 #[test]
 fn phase4_execution_rechecks_capability_and_rejects_missing_provider_support() {
     let candidate = phase4_fault_candidate(
-        0xa3,
         "phase4.faults.capability",
         "published-v1",
         12,
         12,
         VersionLifecycle::Published,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("term"),
+    )
+    .expect("request should be valid");
     let planning_capabilities = ProviderCapabilities::with(ProviderCapability::ExactLookup);
     let plan = plan_query(
         &request,
@@ -649,7 +661,6 @@ fn phase4_execution_rechecks_capability_and_rejects_missing_provider_support() {
 #[test]
 fn phase4_consistency_failure_stops_planning_before_provider_execution() {
     let candidate = phase4_fault_candidate(
-        0xa4,
         "phase4.faults.consistency",
         "published-v1",
         20,
@@ -657,7 +668,7 @@ fn phase4_consistency_failure_stops_planning_before_provider_execution() {
         VersionLifecycle::Published,
     );
     let request = QueryRequest::with_spec(
-        *candidate.index_id(),
+        candidate.definition_identity().clone(),
         None,
         None,
         None,
@@ -688,7 +699,6 @@ fn phase4_consistency_failure_stops_planning_before_provider_execution() {
 #[test]
 fn phase4_pinned_version_mismatch_is_a_failure_and_does_not_substitute_another_version() {
     let candidate = phase4_fault_candidate(
-        0xa5,
         "phase4.faults.pinned",
         "published-v2",
         30,
@@ -696,7 +706,7 @@ fn phase4_pinned_version_mismatch_is_a_failure_and_does_not_substitute_another_v
         VersionLifecycle::Published,
     );
     let request = QueryRequest::with_spec(
-        *candidate.index_id(),
+        candidate.definition_identity().clone(),
         None,
         None,
         None,
@@ -729,15 +739,17 @@ fn phase4_pinned_version_mismatch_is_a_failure_and_does_not_substitute_another_v
 #[test]
 fn phase4_unpublished_candidate_cannot_be_reached_by_provider_execution() {
     let candidate = phase4_fault_candidate(
-        0xa6,
         "phase4.faults.unpublished",
         "candidate-v1",
         40,
         40,
         VersionLifecycle::Ready,
     );
-    let request = QueryRequest::exact(*candidate.index_id(), KeyMaterial::text("term"))
-        .expect("request should be valid");
+    let request = QueryRequest::exact(
+        candidate.definition_identity().clone(),
+        KeyMaterial::text("term"),
+    )
+    .expect("request should be valid");
 
     let result = plan_query(
         &request,
@@ -755,7 +767,6 @@ fn phase4_unpublished_candidate_cannot_be_reached_by_provider_execution() {
 #[test]
 fn phase4_stale_allowed_rejects_lag_beyond_the_declared_freshness_bound() {
     let candidate = phase4_fault_candidate(
-        0xa7,
         "phase4.faults.stale",
         "published-v1",
         50,
@@ -763,7 +774,7 @@ fn phase4_stale_allowed_rejects_lag_beyond_the_declared_freshness_bound() {
         VersionLifecycle::Published,
     );
     let request = QueryRequest::with_spec(
-        *candidate.index_id(),
+        candidate.definition_identity().clone(),
         None,
         None,
         None,
@@ -795,7 +806,6 @@ fn phase4_stale_allowed_rejects_lag_beyond_the_declared_freshness_bound() {
 #[test]
 fn phase4_heterogeneous_hybrid_results_are_rejected_instead_of_returning_misleading_provenance() {
     let first = phase4_fault_candidate(
-        0xa8,
         "phase4.faults.hybrid.a",
         "published-a",
         60,
@@ -803,7 +813,6 @@ fn phase4_heterogeneous_hybrid_results_are_rejected_instead_of_returning_mislead
         VersionLifecycle::Published,
     );
     let second = phase4_fault_candidate(
-        0xa9,
         "phase4.faults.hybrid.b",
         "published-b",
         60,
@@ -811,10 +820,10 @@ fn phase4_heterogeneous_hybrid_results_are_rejected_instead_of_returning_mislead
         VersionLifecycle::Published,
     );
     let request = QueryRequest::hybrid(
-        *first.index_id(),
+        first.definition_identity().clone(),
         vec![
             HybridQueryComponent::with_options(
-                Some(*first.index_id()),
+                Some(first.definition_identity().clone()),
                 AtomicQuery::Exact {
                     key: KeyMaterial::text("a"),
                 },
@@ -822,7 +831,7 @@ fn phase4_heterogeneous_hybrid_results_are_rejected_instead_of_returning_mislead
             )
             .expect("first component should be valid"),
             HybridQueryComponent::with_options(
-                Some(*second.index_id()),
+                Some(second.definition_identity().clone()),
                 AtomicQuery::Exact {
                     key: KeyMaterial::text("b"),
                 },
@@ -862,7 +871,7 @@ fn phase4_heterogeneous_hybrid_results_are_rejected_instead_of_returning_mislead
 
 #[test]
 fn phase5_integrity_fault_rejects_source_version_incompatibility() {
-    let definition = definition();
+    let definition = definition(0);
     let incompatible = nizaam_indexing::index::IndexVersion::with_metadata(
         version_id("index-v9"),
         Some(source_version("source-v9")),
@@ -908,14 +917,14 @@ fn phase5_capacity_fault_rejects_oversized_batch_without_consuming_capacity() {
 
 #[test]
 fn phase5_lifecycle_fault_cannot_bypass_required_index_readiness() {
-    let id = index_id(0xb1);
-    let mut lifecycle = IndexLifecycle::new(id);
+    let id = definition_identity(0xb1);
+    let mut lifecycle = IndexLifecycle::new(id.clone());
 
     let error = lifecycle
         .transition_to(IndexLifecycleState::Active)
         .expect_err("Creating -> Active must be rejected");
 
-    assert_eq!(error.index_id(), id);
+    assert_eq!(error.definition_identity(), &id);
     assert_eq!(error.from(), IndexLifecycleState::Creating);
     assert_eq!(error.to(), IndexLifecycleState::Active);
     assert_eq!(lifecycle.state(), IndexLifecycleState::Creating);
@@ -957,7 +966,7 @@ fn phase6_selected_destination_cannot_bypass_core_runtime_admission() {
     use nizaam_core::control_plane::{
         PolicyInput, RoutingCandidate, RoutingConstraints, RoutingPolicy,
     };
-    use nizaam_indexing::IndexingEngine;
+    use nizaam_indexing::engine::runtime::IndexingEngine;
 
     let engine = IndexingEngine::new(
         nizaam_core::identity::EngineId::new("nizaam.indexing.phase6.fault")

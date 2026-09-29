@@ -16,9 +16,7 @@ use nizaam_indexing::build::{
     BatchExecutor, BatchOptions, BuildInput, BuildSnapshot, CandidateUpdater, IndexBuilder,
     IndexMutation, IndexRebuilder, RebuildInput, UpdateJournal, UpdateSequence,
 };
-use nizaam_indexing::identity::{
-    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace,
-};
+use nizaam_indexing::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
 use nizaam_indexing::index::{
     ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersionId,
     IndexVersionState, KeyDefinition, KeyMaterial, ObjectReference, SchemaVersion, SourceVersion,
@@ -29,8 +27,13 @@ use nizaam_indexing::{
     IntegrityValidator,
 };
 
-fn index_id(seed: u8) -> IndexId {
-    IndexId::from_bytes([seed; 64])
+fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
+    IndexDefinitionIdentity::new(
+        IndexDefinitionId::new(format!("phase3.stress.documents.{seed}"))
+            .expect("definition ID should be valid"),
+        IndexNamespace::new(format!("phase3.stress.{seed}")).expect("namespace should be valid"),
+        IndexFamily::Inverted,
+    )
 }
 
 fn version_id(value: &str) -> IndexVersionId {
@@ -45,14 +48,9 @@ fn schema_version(value: &str) -> SchemaVersion {
     SchemaVersion::new(value).expect("test schema version should be valid")
 }
 
-fn definition() -> IndexDefinition {
+fn definition(seed: u8) -> IndexDefinition {
     IndexDefinition::new(
-        IndexDefinitionIdentity::new(
-            IndexDefinitionId::new("phase3.stress.documents")
-                .expect("definition ID should be valid"),
-            IndexNamespace::new("phase3.stress").expect("namespace should be valid"),
-            IndexFamily::Inverted,
-        ),
+        definition_identity(seed),
         KeyDefinition::new(["term"]).expect("key definition should be valid"),
         TargetReferenceType::new("documents.document")
             .expect("target reference type should be valid"),
@@ -90,8 +88,8 @@ fn build_candidate(
 ) -> nizaam_indexing::build::BuildCandidate {
     IndexBuilder::new()
         .build(BuildInput::new(
-            index_id(seed),
-            definition(),
+            definition_identity(seed),
+            definition(seed),
             version_id(version),
             BuildSnapshot::with_versions(
                 Some(source_version("source-v1")),
@@ -118,8 +116,8 @@ fn many_candidates_remain_independent_under_concurrent_stateless_construction() 
                 let version = format!("candidate-v{seed}");
                 let candidate = builder
                     .build(BuildInput::new(
-                        index_id(seed),
-                        definition(),
+                        definition_identity(seed),
+                        definition(seed),
                         version_id(&version),
                         BuildSnapshot::with_versions(
                             Some(source_version("source-v1")),
@@ -129,7 +127,10 @@ fn many_candidates_remain_independent_under_concurrent_stateless_construction() 
                     ))
                     .expect("concurrent candidate construction should succeed");
 
-                results.push((*candidate.index_id(), candidate.version().id().clone()));
+                results.push((
+                    candidate.definition_identity().clone(),
+                    candidate.version().id().clone(),
+                ));
             }
 
             results
@@ -216,8 +217,8 @@ fn replay_pressure_catches_up_all_post_snapshot_updates() {
     let progress = rebuilder
         .start(
             RebuildInput::new(
-                index_id(0x77),
-                definition(),
+                definition_identity(0x77),
+                definition(0x77),
                 version_id("index-v2"),
                 BuildSnapshot::with_versions(
                     Some(source_version("source-v1")),
@@ -347,8 +348,8 @@ fn rebuild_plus_updates_requires_replay_before_publication() {
     let progress = rebuilder
         .start(
             RebuildInput::new(
-                index_id(0x99),
-                definition(),
+                definition_identity(0x99),
+                definition(0x99),
                 version_id("index-v2"),
                 BuildSnapshot::with_versions(
                     Some(source_version("source-v1")),
@@ -408,13 +409,12 @@ use nizaam_indexing::query::{
 };
 
 fn phase4_stress_index_candidate(
-    seed: u8,
     version: &str,
     source_sequence: u64,
     indexed_sequence: u64,
     lifecycle: VersionLifecycle,
 ) -> IndexCandidate {
-    let definition = definition();
+    let definition = definition(0);
     let version = nizaam_indexing::index::IndexVersion::with_metadata(
         version_id(version),
         Some(source_version("source-v1")),
@@ -441,7 +441,16 @@ fn phase4_stress_index_candidate(
     )
     .expect("phase4 synchronization should be valid");
 
-    IndexCandidate::new(index_id(seed), definition, state, synchronization)
+    IndexCandidate::new(
+        IndexDefinitionIdentity::new(
+            definition.definition_id().clone(),
+            definition.namespace().clone(),
+            definition.family(),
+        ),
+        definition,
+        state,
+        synchronization,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -567,10 +576,10 @@ fn stress_operation_context(seed: usize) -> nizaam_core::operation::OperationCon
 #[test]
 fn phase4_concurrent_query_planning_remains_stateless_and_deterministic() {
     let candidate =
-        phase4_stress_index_candidate(0xa1, "published-v1", 100, 100, VersionLifecycle::Published);
-    let index_id = *candidate.index_id();
+        phase4_stress_index_candidate("published-v1", 100, 100, VersionLifecycle::Published);
+    let definition_identity = candidate.definition_identity().clone();
     let request = Arc::new(
-        QueryRequest::exact(index_id, KeyMaterial::text("parallel"))
+        QueryRequest::exact(definition_identity.clone(), KeyMaterial::text("parallel"))
             .expect("parallel request should be valid"),
     );
     let candidate = Arc::new(candidate);
@@ -578,6 +587,7 @@ fn phase4_concurrent_query_planning_remains_stateless_and_deterministic() {
         .map(|_| {
             let request = Arc::clone(&request);
             let candidate = Arc::clone(&candidate);
+            let definition_identity = definition_identity.clone();
             std::thread::spawn(move || {
                 let plan = plan_query(
                     &request,
@@ -587,8 +597,10 @@ fn phase4_concurrent_query_planning_remains_stateless_and_deterministic() {
                 )
                 .expect("concurrent logical planning should succeed");
                 assert_eq!(
-                    plan.target().expect("target should exist").index_id(),
-                    &index_id
+                    plan.target()
+                        .expect("target should exist")
+                        .definition_identity(),
+                    &definition_identity
                 );
                 assert_eq!(
                     plan.target()
@@ -610,11 +622,11 @@ fn phase4_concurrent_query_planning_remains_stateless_and_deterministic() {
 #[test]
 fn phase4_current_query_remains_on_the_published_version_during_rebuild_pressure() {
     let published =
-        phase4_stress_index_candidate(0xa2, "published-v1", 120, 120, VersionLifecycle::Published);
+        phase4_stress_index_candidate("published-v1", 120, 120, VersionLifecycle::Published);
     let rebuilding =
-        phase4_stress_index_candidate(0xa2, "candidate-v2", 120, 120, VersionLifecycle::Ready);
+        phase4_stress_index_candidate("candidate-v2", 120, 120, VersionLifecycle::Ready);
     let request = QueryRequest::with_spec(
-        *published.index_id(),
+        published.definition_identity().clone(),
         None,
         None,
         None,
@@ -653,9 +665,9 @@ fn phase4_current_query_remains_on_the_published_version_during_rebuild_pressure
 #[test]
 fn phase4_stale_allowed_pressure_chooses_the_lowest_acceptable_update_sequence_lag() {
     let request_candidate =
-        phase4_stress_index_candidate(0xa3, "published-v0", 200, 200, VersionLifecycle::Published);
+        phase4_stress_index_candidate("published-v0", 200, 200, VersionLifecycle::Published);
     let request = QueryRequest::with_spec(
-        *request_candidate.index_id(),
+        request_candidate.definition_identity().clone(),
         None,
         None,
         None,
@@ -673,7 +685,6 @@ fn phase4_stale_allowed_pressure_chooses_the_lowest_acceptable_update_sequence_l
     let candidates: Vec<_> = (0..32u8)
         .map(|seed| {
             phase4_stress_index_candidate(
-                0xa3,
                 &format!("published-v{seed}"),
                 200,
                 if seed == 0 {
@@ -714,8 +725,8 @@ fn phase4_stale_allowed_pressure_chooses_the_lowest_acceptable_update_sequence_l
 #[test]
 fn phase4_slow_provider_retrieval_remains_bounded_and_completes_under_concurrent_pressure() {
     let candidate =
-        phase4_stress_index_candidate(0xa4, "published-v1", 300, 300, VersionLifecycle::Published);
-    let index_id = *candidate.index_id();
+        phase4_stress_index_candidate("published-v1", 300, 300, VersionLifecycle::Published);
+    let definition_identity = candidate.definition_identity().clone();
     let provider = Arc::new(StressQueryProvider::new(ProviderCapabilities::with(
         ProviderCapability::ExactLookup,
     )));
@@ -724,10 +735,13 @@ fn phase4_slow_provider_retrieval_remains_bounded_and_completes_under_concurrent
     for worker in 0..8usize {
         let provider = Arc::clone(&provider);
         let candidate = candidate.clone();
+        let definition_identity = definition_identity.clone();
         handles.push(std::thread::spawn(move || {
-            let request =
-                QueryRequest::exact(index_id, KeyMaterial::text(format!("worker-{worker}")))
-                    .expect("stress query should be valid");
+            let request = QueryRequest::exact(
+                definition_identity.clone(),
+                KeyMaterial::text(format!("worker-{worker}")),
+            )
+            .expect("stress query should be valid");
             let plan = plan_query(
                 &request,
                 vec![candidate],
@@ -948,7 +962,8 @@ fn phase5_independent_lifecycle_pressure_does_not_share_index_state() {
 
     for worker in 0..workers {
         handles.push(thread::spawn(move || {
-            let mut lifecycle = nizaam_indexing::IndexLifecycle::new(index_id(0xc0 + worker as u8));
+            let mut lifecycle =
+                nizaam_indexing::IndexLifecycle::new(definition_identity(0xc0 + worker as u8));
 
             lifecycle
                 .mark_building()

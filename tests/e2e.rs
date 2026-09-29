@@ -43,6 +43,7 @@
 //!
 //! This test does not invent an Indexing-owned middleware or runtime.
 
+use nizaam_indexing::engine::runtime::IndexingEngine;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -73,10 +74,7 @@ use nizaam_core::security::{
 };
 use nizaam_core::status::Status;
 
-use nizaam_indexing::{
-    IndexingEngine,
-    security::{IndexingAuthorizationError, IndexingAuthorizationRequirement},
-};
+use nizaam_indexing::security::{IndexingAuthorizationError, IndexingAuthorizationRequirement};
 
 const ENGINE_ID: &str = "nizaam.indexing.e2e";
 const ENGINE_INSTANCE_ID: &str = "nizaam.indexing.e2e.instance";

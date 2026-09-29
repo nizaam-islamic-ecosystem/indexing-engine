@@ -2,7 +2,7 @@
 //!
 //! This module composes the identity implementation files:
 //!
-//! - [`index`] defines `IndexId` and the frozen Phase 2 generation scheme.
+//! - [`index`] defines `IndexId`, `IndexAssignedId`, and their identity generation schemes.
 //! - [`namespace`] defines `IndexNamespace` and `NamespaceRegistry`.
 //! - [`definition`] defines `IndexDefinitionId` and `IndexDefinitionIdentity`.
 //!
@@ -18,7 +18,8 @@ pub use definition::{
     IndexDefinitionId, IndexDefinitionIdValidationError, IndexDefinitionIdentity,
 };
 pub use index::{
-    INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN, IndexId, IndexIdGenerationError, IndexIdGenerationVersion,
+    INDEX_ASSIGNED_ID_BIT_LEN, INDEX_ASSIGNED_ID_BYTE_LEN, INDEX_ID_BIT_LEN, INDEX_ID_BYTE_LEN,
+    IndexAssignedId, IndexId, IndexIdGenerationError, IndexIdGenerationVersion,
 };
 pub use namespace::{
     IndexNamespace, MAX_NAMESPACE_BYTES, NamespaceRegistry, NamespaceRegistryError,
@@ -28,7 +29,7 @@ pub use namespace::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{IndexFamily, KeyMaterial};
+    use crate::index::{IndexFamily, KeyMaterial, ObjectReference, TargetReferenceType};
 
     fn index_id(seed: u8) -> IndexId {
         let bytes = core::array::from_fn(|offset| seed.wrapping_add(offset as u8));
@@ -41,6 +42,47 @@ mod tests {
 
     fn definition_id(value: &str) -> IndexDefinitionId {
         IndexDefinitionId::new(value).expect("test definition ID must be valid")
+    }
+
+    fn assigned_id(target: &str, source: &str, reference: &str) -> IndexAssignedId {
+        let target =
+            TargetReferenceType::new(target).expect("test target reference type must be valid");
+        let object =
+            ObjectReference::new(source, reference).expect("test object reference must be valid");
+
+        IndexAssignedId::generate(&target, &object)
+    }
+
+    #[test]
+    fn identity_boundary_reexports_index_assigned_id() {
+        let assigned = assigned_id("source.object", "quran", "verse:1:1");
+
+        assert_eq!(assigned.target_reference_type().as_str(), "source.object");
+        assert_eq!(assigned.as_bytes().len(), INDEX_ASSIGNED_ID_BYTE_LEN);
+        assert_eq!(INDEX_ASSIGNED_ID_BIT_LEN, 512);
+    }
+
+    #[test]
+    fn identity_boundary_keeps_index_id_and_assigned_id_as_distinct_roles() {
+        let index = index_id(0x11);
+        let assigned = assigned_id("source.object", "quran", "verse:1:1");
+
+        assert_eq!(index.as_bytes().len(), INDEX_ID_BYTE_LEN);
+        assert_eq!(assigned.as_bytes().len(), INDEX_ASSIGNED_ID_BYTE_LEN);
+
+        fn accepts_operation_id(_: &IndexId) {}
+        fn accepts_assigned_id(_: &IndexAssignedId) {}
+
+        accepts_operation_id(&index);
+        accepts_assigned_id(&assigned);
+    }
+
+    #[test]
+    fn identity_boundary_preserves_assigned_id_across_separate_operations_for_same_target() {
+        let first = assigned_id("source.object", "quran", "verse:1:1");
+        let second = assigned_id("source.object", "quran", "verse:1:1");
+
+        assert_eq!(first, second);
     }
 
     #[test]

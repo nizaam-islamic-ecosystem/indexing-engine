@@ -143,6 +143,7 @@ pub struct ClassifiedFailure {
 
 impl ClassifiedFailure {
     /// Creates a classified failure from an Indexing failure class.
+    #[must_use]
     pub const fn new(class: FailureClass) -> Self {
         Self { class }
     }
@@ -181,6 +182,7 @@ pub struct FailureClassifier;
 
 impl FailureClassifier {
     /// Creates the stateless classifier.
+    #[must_use]
     pub const fn new() -> Self {
         Self
     }

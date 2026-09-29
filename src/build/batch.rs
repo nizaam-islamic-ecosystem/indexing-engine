@@ -493,15 +493,20 @@ impl BatchExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexNamespace};
+    use crate::identity::{IndexDefinitionId, IndexDefinitionIdentity, IndexNamespace};
     use crate::index::{
         ConsistencyRequirement, IndexDefinition, IndexEntry, IndexFamily, IndexVersion,
         IndexVersionId, KeyDefinition, KeyMaterial, ObjectReference, TargetReferenceType,
         Uniqueness,
     };
 
-    fn index_id(seed: u8) -> IndexId {
-        IndexId::from_bytes([seed; 64])
+    fn definition_identity(seed: u8) -> IndexDefinitionIdentity {
+        IndexDefinitionIdentity::new(
+            IndexDefinitionId::new(format!("documents.v{seed:02x}"))
+                .expect("definition ID should be valid"),
+            IndexNamespace::new("search.documents").expect("namespace should be valid"),
+            IndexFamily::Inverted,
+        )
     }
 
     fn version_id(value: &str) -> IndexVersionId {
@@ -531,7 +536,7 @@ mod tests {
 
     fn candidate(uniqueness: Uniqueness, entries: Vec<IndexEntry>) -> BuildCandidate {
         BuildCandidate::from_parts(
-            index_id(0x11),
+            definition_identity(0x11),
             definition(uniqueness),
             IndexVersion::with_metadata(
                 version_id("index-v1"),
