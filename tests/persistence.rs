@@ -1,7 +1,8 @@
 //! Level 3 integration tests for durable Indexing Assignment Operation state.
 //!
 //! These tests exercise the filesystem side effects of the real
-//! `IndexingEngine::handle_index_event` path. They intentionally use isolated
+//! `IndexingEngine::handle_index_event` path, including execution reached
+//! through the Control Plane-facing typed ingress. They intentionally use isolated
 //! operation roots so the tests never touch the application's default
 //! persistence location.
 
@@ -159,6 +160,58 @@ fn received_index_event_snapshot_contains_the_exact_durable_event_fields() {
     assert!(snapshot.contains(&format!("key_material={expected_key}\n")));
     assert!(snapshot.contains(&format!("source_payload={expected_payload}\n")));
     assert!(snapshot.contains("debug=IndexEvent"));
+
+    engine.shutdown().expect("engine shutdown should succeed");
+    remove_test_operation_root(&root);
+}
+
+#[test]
+fn control_plane_index_event_ingress_uses_the_same_durable_execution_lifecycle() {
+    let root = common::test_operation_root();
+    let engine = prepare_serving_engine(root.clone());
+    let event = test_index_event("persistence-control-plane-ingress");
+    let request = common::control_plane_request_for_event(&event);
+    let index_id = IndexId::generate(
+        event.requirement().namespace(),
+        test_index_definition().definition_id(),
+        event.requirement().family(),
+        event.key_material(),
+    )
+    .expect("test IndexId generation should succeed");
+
+    let response = engine
+        .handle_control_plane_index_event(
+            &request,
+            &test_index_definition(),
+            &test_capacity_accounting(),
+            test_index_event_capacity_request(),
+        )
+        .expect("Control Plane IndexEvent ingress should persist successfully");
+
+    let event_snapshot = event_snapshot_path(&root, &index_id, response.event());
+    let response_snapshot = response_snapshot_path(&root, &index_id, response.event());
+    let journal = journal_path(&root, &index_id);
+
+    assert!(event_snapshot.is_file());
+    assert!(response_snapshot.is_file());
+    assert!(journal.is_file());
+
+    let snapshot = common::read_test_file(&event_snapshot);
+    assert!(snapshot.contains(&format!("event_id={}\n", request.event_id().as_str())));
+    assert!(snapshot.contains(&format!("message_id={}\n", request.message_id().as_str())));
+    assert!(snapshot.contains(&format!(
+        "operation_id={}\n",
+        request.universal_event().envelope.operation_context.operation.id.as_str()
+    )));
+    assert!(snapshot.contains(&format!(
+        "source_payload={}\n",
+        hex_encode(event.source_payload())
+    )));
+
+    let journal_contents = common::read_test_file(&journal);
+    assert_eq!(journal_contents.lines().count(), 2);
+    assert!(journal_contents.contains("\"status\":\"started\""));
+    assert!(journal_contents.contains("\"status\":\"completed\""));
 
     engine.shutdown().expect("engine shutdown should succeed");
     remove_test_operation_root(&root);

@@ -19,11 +19,13 @@
 mod common;
 
 use common::{
-    capability_definition, counting_echo_handler, engine, engine_registry, invocation_count,
-    invocation_counter, register_engine, remove_test_operation_root, test_capability_id,
-    test_capacity_accounting, test_engine_id, test_index_definition, test_index_event,
-    test_index_event_capacity_request, test_index_instance_id,
+    capability_definition, control_plane_request_for_event, counting_echo_handler, engine,
+    engine_registry, invocation_count, invocation_counter, register_engine,
+    remove_test_operation_root, test_capability_id, test_capacity_accounting, test_engine_id,
+    test_index_definition, test_index_event, test_index_event_capacity_request,
+    test_index_instance_id,
 };
+use nizaam_core::contracts::{EncodedPayload, MessageEnvelope};
 use nizaam_core::runtime::LifecycleState;
 use nizaam_indexing::IndexEvent;
 use nizaam_indexing::identity::IndexAssignedId;
@@ -212,4 +214,47 @@ fn index_event_uses_the_supplied_definition_and_does_not_infer_definition_fields
 
     engine.shutdown().expect("engine shutdown should succeed");
     remove_test_operation_root(engine.operation_root());
+}
+
+#[test]
+fn control_plane_transport_round_trip_preserves_indexing_fields_and_source_payload() {
+    let event = successful_event("index-event-control-plane-round-trip");
+    let request = control_plane_request_for_event(&event);
+    let reconstructed = IndexEvent::from_control_plane_request(request)
+        .expect("Control Plane request must reconstruct a valid IndexEvent");
+    assert_eq!(reconstructed.entity_type(), event.entity_type());
+    assert_eq!(reconstructed.requirement(), event.requirement());
+    assert_eq!(reconstructed.object_reference(), event.object_reference());
+    assert_eq!(reconstructed.key_material(), event.key_material());
+    assert_eq!(reconstructed.source_payload(), event.source_payload());
+}
+
+#[test]
+fn control_plane_transport_preserves_core_message_and_operation_identity() {
+    let event = successful_event("index-event-control-plane-identity");
+    let request = control_plane_request_for_event(&event);
+    let expected_message_id = request.message_id().clone();
+    let expected_event_id = request.event_id().clone();
+    let expected_operation = request.universal_event().envelope.operation_context.clone();
+    let reconstructed = IndexEvent::from_control_plane_request(request)
+        .expect("Control Plane request must reconstruct a valid IndexEvent");
+    assert_eq!(reconstructed.message_id(), &expected_message_id);
+    assert_eq!(reconstructed.event_id(), &expected_event_id);
+    assert_eq!(reconstructed.operation_context(), &expected_operation);
+}
+
+#[test]
+fn malformed_control_plane_payload_is_rejected_before_index_event_reconstruction() {
+    let event = successful_event("index-event-control-plane-invalid");
+    let request = control_plane_request_for_event(&event);
+    let envelope = request.universal_event().envelope.clone();
+    let descriptor = envelope.metadata.descriptor.payload.clone();
+    let malformed = vec![b'N', b'I', b'Z', b'E', 1, 0xff];
+    let malformed_request = nizaam_core::contracts::UniversalRequest::new(MessageEnvelope::new(
+        request.message_id().clone(),
+        request.universal_event().envelope.operation_context.clone(),
+        envelope.metadata,
+        EncodedPayload::new(descriptor, malformed),
+    ));
+    assert!(IndexEvent::from_control_plane_request(malformed_request).is_err());
 }

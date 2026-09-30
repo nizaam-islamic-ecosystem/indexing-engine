@@ -865,7 +865,8 @@ fn phase6_concurrent_control_plane_selection_remains_stateless_and_does_not_muta
         EngineId::new("nizaam.indexing.phase6.stress").expect("engine id should be valid"),
         nizaam_core::identity::EngineInstanceId::new("nizaam.indexing.phase6.stress.instance")
             .expect("engine instance id should be valid"),
-    );
+    )
+    .expect("default IndexingEngine construction should resolve a platform home directory");
 
     engine.start().expect("engine should start");
     engine

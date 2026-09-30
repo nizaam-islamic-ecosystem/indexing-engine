@@ -25,6 +25,7 @@ use nizaam_core::runtime::{EngineContext, EngineRuntime, LifecycleState, Request
 use super::capability::CapabilitySet;
 use super::registration::IndexingRegistration;
 use crate::capacity::{CapacityAccounting, CapacityAdmissionError, CapacityRequest};
+use crate::event::index_event::IndexEventTransportError;
 use crate::event::{IndexEvent, IndexEventResponse, IndexEventValidationError};
 use crate::identity::IndexDefinitionId;
 use crate::index::IndexDefinition;
@@ -266,6 +267,8 @@ pub enum EngineSetupError {
     Lifecycle(InvalidTransition),
     Registry(ControlPlaneRegistryError),
     CapabilityRegistry(CapabilityRegistryError),
+    OperationRootUnavailable,
+    OperationRootCreationFailed(String),
     CapabilityOwnerMismatch {
         capability_id: nizaam_core::identity::CapabilityId,
         expected_engine: EngineId,
@@ -279,6 +282,14 @@ impl std::fmt::Display for EngineSetupError {
             Self::Lifecycle(error) => error.fmt(formatter),
             Self::Registry(error) => error.fmt(formatter),
             Self::CapabilityRegistry(error) => error.fmt(formatter),
+            Self::OperationRootUnavailable => write!(
+                formatter,
+                "could not resolve a platform home directory for the default Indexing operation root",
+            ),
+            Self::OperationRootCreationFailed(error) => write!(
+                formatter,
+                "could not create the default Indexing .nizaam directory: {error}",
+            ),
             Self::CapabilityOwnerMismatch {
                 capability_id,
                 expected_engine,
@@ -378,6 +389,7 @@ pub enum IndexEventHandlingError {
         actual: EngineInstanceId,
     },
     EventValidation(IndexEventValidationError),
+    Transport(IndexEventTransportError),
     Capacity(CapacityAdmissionError),
     Capability(CapabilityError),
     DefinitionRequirementMismatch {
@@ -413,6 +425,7 @@ impl std::fmt::Display for IndexEventHandlingError {
                 expected.as_str(),
             ),
             Self::EventValidation(error) => error.fmt(formatter),
+            Self::Transport(error) => error.fmt(formatter),
             Self::Capacity(error) => error.fmt(formatter),
             Self::Capability(error) => error.fmt(formatter),
             Self::DefinitionRequirementMismatch { definition_id } => write!(
@@ -451,6 +464,7 @@ impl std::error::Error for IndexEventHandlingError {
         match self {
             Self::Admission(error) => Some(error),
             Self::EventValidation(error) => Some(error),
+            Self::Transport(error) => Some(error),
             Self::Capacity(error) => Some(error),
             Self::Capability(error) => Some(error),
             Self::DefinitionRequirementMismatch { .. }
@@ -474,6 +488,12 @@ impl From<RequestAdmissionError> for IndexEventHandlingError {
 impl From<IndexEventValidationError> for IndexEventHandlingError {
     fn from(error: IndexEventValidationError) -> Self {
         Self::EventValidation(error)
+    }
+}
+
+impl From<IndexEventTransportError> for IndexEventHandlingError {
+    fn from(error: IndexEventTransportError) -> Self {
+        Self::Transport(error)
     }
 }
 
@@ -977,25 +997,56 @@ impl Drop for OperationLock {
 const INDEX_ASSIGNMENT_STATUS_STARTED: &str = "started";
 const INDEX_ASSIGNMENT_STATUS_COMPLETED: &str = "completed";
 
+fn platform_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE")?;
+                let path = std::env::var_os("HOMEPATH")?;
+                Some(PathBuf::from(format!(
+                    "{}{}",
+                    drive.to_string_lossy(),
+                    path.to_string_lossy()
+                )))
+            })
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
 impl IndexingEngine {
     /// Creates a new Indexing Engine facade in the Core `Created` state.
     ///
-    /// The default operation root is the user's home directory under
-    /// `$HOME/.nizaam/indexing`.
+    /// The default operation root is the platform home directory under
+    /// `.nizaam/indexing`. Home-directory resolution is platform-aware and
+    /// failure is returned as a recoverable [`EngineSetupError`] instead of
+    /// panicking.
     ///
     /// Applications that need a specific durable location should use
     /// [`Self::new_with_operation_root`].
-    #[must_use]
-    pub fn new(engine_id: EngineId, engine_instance_id: EngineInstanceId) -> Self {
-        let home_dir = std::env::var_os("HOME").map(PathBuf::from).expect(
-            "HOME environment variable must be set for the default Indexing operation root",
-        );
+    pub fn new(
+        engine_id: EngineId,
+        engine_instance_id: EngineInstanceId,
+    ) -> Result<Self, EngineSetupError> {
+        let home_dir = platform_home_dir().ok_or(EngineSetupError::OperationRootUnavailable)?;
+        let nizaam_directory = home_dir.join(".nizaam");
 
-        Self::new_with_operation_root(
+        // `create_dir_all` is intentionally used here instead of requiring the
+        // `.nizaam` directory to exist beforehand. It is idempotent: an existing
+        // directory is accepted, while a missing directory is created automatically.
+        std::fs::create_dir_all(&nizaam_directory)
+            .map_err(|error| EngineSetupError::OperationRootCreationFailed(error.to_string()))?;
+
+        Ok(Self::new_with_operation_root(
             engine_id,
             engine_instance_id,
-            home_dir.join(".nizaam").join("indexing"),
-        )
+            nizaam_directory.join("indexing"),
+        ))
     }
 
     /// Creates a new Indexing Engine facade with an explicit durable operation
@@ -1197,39 +1248,38 @@ impl IndexingEngine {
         }
     }
 
-    /// Executes one typed Index Assignment Operation.
+    /// Handles an IndexEvent delivered through the Core request boundary.
+    ///
+    /// This is the Control Plane-facing typed ingress. Core admission and
+    /// target validation happen first; the explicit Indexing transport payload
+    /// is then reconstructed into `IndexEvent`, after which the canonical typed
+    /// execution path below performs validation, capacity admission, durable
+    /// lifecycle, Core capability dispatch, and response persistence.
+    pub fn handle_control_plane_index_event(
+        &self,
+        request: &UniversalRequest,
+        definition: &IndexDefinition,
+        capacity: &CapacityAccounting,
+        capacity_request: CapacityRequest,
+    ) -> Result<IndexEventResponse, IndexEventHandlingError> {
+        self.runtime.admit_request()?;
+        self.validate_request_target(request)?;
+
+        let event = IndexEvent::from_control_plane_request(request.clone())?;
+        self.handle_index_event_admitted(&event, definition, capacity, capacity_request)
+    }
+
+    /// Executes one typed Index Assignment Operation after Core admission and
+    /// target routing have succeeded.
     ///
     /// The canonical [`IndexDefinition`] is supplied explicitly because an
     /// [`IndexRequirement`] intentionally does not contain definition identity.
     /// The runtime verifies that the source requirement matches that canonical
     /// definition before using its `IndexDefinitionId` for assignment identity.
-    /// This preserves the existing normalization boundary instead of deriving a
-    /// definition ID from Core transport metadata.
     ///
-    /// The execution order is:
-    ///
-    /// ```text
-    /// Core admission
-    ///     -> target validation
-    ///     -> IndexEvent validation
-    ///     -> requirement/definition binding validation
-    ///     -> capacity admission
-    ///     -> clone received IndexEvent
-    ///     -> IndexId generation
-    ///     -> IndexAssignedId generation
-    ///     -> duplicate/idempotency state check
-    ///     -> exclusive operation claim
-    ///     -> persist received IndexEvent snapshot
-    ///     -> persist `started` operation record
-    ///     -> Core capability dispatch / assignment execution
-    ///     -> construct IndexEventResponse
-    ///     -> clone and persist IndexEventResponse snapshot
-    ///     -> persist `completed` operation record
-    /// ```
-    ///
-    /// `EntityType` is consumed as source-supplied classification metadata and
-    /// is persisted with the assignment. It is never inferred from the opaque
-    /// Core payload.
+    /// This remains the canonical Indexing execution path. Its durable
+    /// operation lifecycle is deliberately not moved into the Control Plane
+    /// adapter above.
     pub fn handle_index_event(
         &self,
         event: &IndexEvent,
@@ -1238,26 +1288,17 @@ impl IndexingEngine {
         capacity_request: CapacityRequest,
     ) -> Result<IndexEventResponse, IndexEventHandlingError> {
         self.runtime.admit_request()?;
+        self.validate_event_target(event)?;
+        self.handle_index_event_admitted(event, definition, capacity, capacity_request)
+    }
 
-        let envelope = &event.universal_event().envelope;
-        let participants = &envelope.metadata.participants;
-
-        if participants.target != self.engine_id().clone() {
-            return Err(IndexEventHandlingError::TargetEngineMismatch {
-                expected: self.engine_id().clone(),
-                actual: participants.target.clone(),
-            });
-        }
-
-        if let Some(target_instance) = participants.target_instance.as_ref()
-            && target_instance != self.engine_instance_id()
-        {
-            return Err(IndexEventHandlingError::TargetInstanceMismatch {
-                expected: self.engine_instance_id().clone(),
-                actual: target_instance.clone(),
-            });
-        }
-
+    fn handle_index_event_admitted(
+        &self,
+        event: &IndexEvent,
+        definition: &IndexDefinition,
+        capacity: &CapacityAccounting,
+        capacity_request: CapacityRequest,
+    ) -> Result<IndexEventResponse, IndexEventHandlingError> {
         event.validate()?;
         self.validate_definition_matches_requirement(event, definition)?;
 
@@ -1291,6 +1332,9 @@ impl IndexingEngine {
             hex_encode(index_id.as_bytes())
         ));
 
+        // Re-check after acquiring the exclusive operation marker. Another
+        // concurrent request may have completed the operation between the
+        // first journal inspection and lock acquisition.
         match existing_operation_state(
             &journal_path,
             received_event.event_id().as_str(),
@@ -1324,9 +1368,6 @@ impl IndexingEngine {
             }
         };
 
-        // Re-check after acquiring the exclusive operation marker. Another
-        // concurrent request may have completed the operation between the
-        // first journal inspection and lock acquisition.
         match existing_operation_state(
             &journal_path,
             received_event.event_id().as_str(),
@@ -1380,8 +1421,7 @@ impl IndexingEngine {
         // and the identity produced for this assignment.
         let response = IndexEventResponse::new(received_event.clone(), assigned_id);
 
-        // Persist the exact response object produced by the execution path.
-        // Completion is not recorded until this snapshot is durable.
+        // Completion is not recorded until the response snapshot is durable.
         let response_copy = response.clone();
         let response_snapshot = persist_index_event_response(&operation_directory, &response_copy)?;
 
@@ -1397,6 +1437,34 @@ impl IndexingEngine {
         )?;
 
         Ok(response)
+    }
+
+    fn validate_request_target(
+        &self,
+        request: &UniversalRequest,
+    ) -> Result<(), IndexEventHandlingError> {
+        let participants = &request.universal_event().envelope.metadata.participants;
+        if participants.target != self.engine_id().clone() {
+            return Err(IndexEventHandlingError::TargetEngineMismatch {
+                expected: self.engine_id().clone(),
+                actual: participants.target.clone(),
+            });
+        }
+
+        if let Some(target_instance) = participants.target_instance.as_ref()
+            && target_instance != self.engine_instance_id()
+        {
+            return Err(IndexEventHandlingError::TargetInstanceMismatch {
+                expected: self.engine_instance_id().clone(),
+                actual: target_instance.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_event_target(&self, event: &IndexEvent) -> Result<(), IndexEventHandlingError> {
+        self.validate_request_target(event.request())
     }
 
     fn validate_definition_matches_requirement(

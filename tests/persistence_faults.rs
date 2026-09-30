@@ -1,5 +1,5 @@
 //! Level 3 integration tests for persistence-boundary failures in the real
-//! `IndexingEngine::handle_index_event` path.
+//! `IndexingEngine::handle_index_event` path and its Control Plane-facing ingress.
 //!
 //! Each test forces one concrete filesystem boundary to fail by using an
 //! isolated temporary operation root and a path collision. No production
@@ -20,6 +20,7 @@ use common::{
     test_index_event_capacity_request,
 };
 use nizaam_core::capability::{CapabilityOutcome, arc_handler};
+use nizaam_core::contracts::{EncodedPayload, MessageEnvelope, UniversalRequest};
 use nizaam_indexing::IndexEvent;
 use nizaam_indexing::engine::runtime::IndexEventHandlingError;
 use nizaam_indexing::identity::IndexId;
@@ -112,6 +113,42 @@ fn execute_event(
         &test_capacity_accounting(),
         test_index_event_capacity_request(),
     )
+}
+
+#[test]
+fn malformed_control_plane_payload_fails_before_any_persistence_or_capability_execution() {
+    let root = common::test_operation_root();
+    let counter = invocation_counter();
+    let engine = prepare_serving_engine(root.clone(), counting_echo_handler(counter.clone()));
+    let event = test_index_event("persistence-fault-control-plane-transport");
+    let index_id = index_id_for(&event);
+    let request = common::control_plane_request_for_event(&event);
+
+    let envelope = request.universal_event().envelope.clone();
+    let descriptor = envelope.metadata.descriptor.payload.clone();
+    let malformed_request = UniversalRequest::new(MessageEnvelope::new(
+        request.message_id().clone(),
+        request.universal_event().envelope.operation_context.clone(),
+        envelope.metadata,
+        EncodedPayload::new(descriptor, vec![b'N', b'I', b'Z', b'E', 1, 0xff]),
+    ));
+
+    let error = engine
+        .handle_control_plane_index_event(
+            &malformed_request,
+            &test_index_definition(),
+            &test_capacity_accounting(),
+            test_index_event_capacity_request(),
+        )
+        .expect_err("malformed Control Plane transport must be rejected");
+
+    assert!(matches!(error, IndexEventHandlingError::Transport(_)));
+    assert_eq!(invocation_count(&counter), 0);
+    assert!(!operation_directory(&root, &index_id).exists());
+    assert!(!journal_path(&root, &index_id).exists());
+
+    engine.shutdown().expect("engine shutdown should succeed");
+    remove_test_operation_root(&root);
 }
 
 #[test]

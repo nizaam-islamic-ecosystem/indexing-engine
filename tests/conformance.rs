@@ -144,7 +144,8 @@ fn phase2_index_version(id: &str) -> IndexVersion {
 fn indexing_engine_keeps_core_engine_and_instance_identity_roles_distinct() {
     let engine_id = engine_id("nizaam.indexing.conformance.identity");
     let instance_id = engine_instance_id("nizaam.indexing.conformance.identity.instance");
-    let engine = IndexingEngine::new(engine_id.clone(), instance_id.clone());
+    let engine = IndexingEngine::new(engine_id.clone(), instance_id.clone())
+        .expect("default IndexingEngine construction should resolve a platform home directory");
 
     assert_eq!(engine.engine_id(), &engine_id);
     assert_eq!(engine.engine_instance_id(), &instance_id);
@@ -292,11 +293,13 @@ fn capability_state_is_not_a_global_registry_shared_by_independent_engines() {
     let first = IndexingEngine::new(
         engine_id("nizaam.indexing.conformance.first"),
         engine_instance_id("nizaam.indexing.conformance.first.instance"),
-    );
+    )
+    .expect("default IndexingEngine construction should resolve a platform home directory");
     let second = IndexingEngine::new(
         engine_id("nizaam.indexing.conformance.second"),
         engine_instance_id("nizaam.indexing.conformance.second.instance"),
-    );
+    )
+    .expect("default IndexingEngine construction should resolve a platform home directory");
 
     first.start().unwrap();
     first.begin_registration().unwrap();

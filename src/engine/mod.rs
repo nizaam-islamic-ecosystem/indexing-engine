@@ -119,6 +119,31 @@ mod tests {
     }
 
     #[test]
+    fn control_plane_index_event_ingress_is_exposed_by_the_runtime_boundary() {
+        use super::runtime::IndexingEngine;
+
+        let engine = engine_id("nizaam.indexing.level2.control-plane");
+        let instance = instance_id("nizaam.indexing.level2.control-plane.instance");
+        let engine = IndexingEngine::new(engine, instance)
+            .expect("default IndexingEngine construction should resolve a platform home directory");
+
+        // The assertion is intentionally type-level at Level 2: orchestration
+        // remains in `runtime.rs`, while `mod.rs` only composes and exports it.
+        let _ingress: fn(
+            &IndexingEngine,
+            &nizaam_core::contracts::UniversalRequest,
+            &crate::index::IndexDefinition,
+            &crate::capacity::CapacityAccounting,
+            crate::capacity::CapacityRequest,
+        ) -> Result<
+            crate::event::IndexEventResponse,
+            super::runtime::IndexEventHandlingError,
+        > = IndexingEngine::handle_control_plane_index_event;
+
+        let _ = engine;
+    }
+
+    #[test]
     fn capability_registration_uses_the_same_engine_identity_as_runtime() {
         let engine = engine_id("nizaam.indexing.level2.capability");
         let instance = instance_id("nizaam.indexing.level2.capability.instance");

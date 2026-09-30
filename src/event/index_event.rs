@@ -24,7 +24,9 @@
 //! infer domain/entity semantics from the opaque Core payload. Core remains the
 //! owner of occurrence identity, engine identity transport metadata,
 //! operation/correlation context, cancellation/deadline context, and the
-//! UniversalRequest boundary.
+//! UniversalRequest boundary. When an IndexEvent crosses the Control Plane,
+//! the Indexing-owned fields are carried in an explicit versioned payload
+//! boundary and reconstructed without creating replacement Core identities.
 //!
 //! The event contains no physical provider instruction. There is deliberately
 //! no field for a B-tree, HNSW, FAISS, Lucene, GIN, database, table,
@@ -32,14 +34,18 @@
 //! payload remains opaque to Indexing and is carried by Core unchanged.
 
 use core::fmt;
+use std::collections::BTreeMap;
 use std::error::Error;
 
 use nizaam_core::contracts::{Interaction, UniversalEvent, UniversalRequest};
 use nizaam_core::identity::{EngineId, EngineInstanceId, EventId, MessageId};
 use nizaam_core::operation::OperationContext;
 
+use crate::identity::IndexNamespace;
 use crate::index::{
-    KeyMaterial, KeyMaterialValidationError, ObjectReference, ObjectReferenceValidationError,
+    ConsistencyRequirement, IndexFamily, KeyDefinition, KeyMaterial, KeyMaterialValidationError,
+    ObjectReference, ObjectReferenceValidationError, SchemaVersion, SourceVersion,
+    TargetReferenceType, Uniqueness,
 };
 use crate::requirement::{IndexRequirement, IndexRequirementValidationError};
 
@@ -191,6 +197,10 @@ pub struct IndexEvent {
     requirement: IndexRequirement,
     object_reference: ObjectReference,
     key_material: KeyMaterial,
+    /// Source payload recovered from the explicit Control Plane transport
+    /// envelope. `None` means the Core request payload is already the source
+    /// payload, which is the normal local construction path.
+    source_payload_override: Option<Vec<u8>>,
 }
 
 impl IndexEvent {
@@ -212,6 +222,7 @@ impl IndexEvent {
             requirement,
             object_reference,
             key_material,
+            source_payload_override: None,
         };
 
         event.validate()?;
@@ -334,7 +345,465 @@ impl IndexEvent {
     /// provider instruction. The source remains the owner of its semantics.
     #[must_use]
     pub fn source_payload(&self) -> &[u8] {
-        self.universal_event().envelope.payload.bytes()
+        self.source_payload_override
+            .as_deref()
+            .unwrap_or_else(|| self.universal_event().envelope.payload.bytes())
+    }
+
+    /// Encodes the Indexing-owned fields together with the source payload for
+    /// transport through a Core [`UniversalRequest`].
+    ///
+    /// Core remains the owner of the surrounding envelope and its identities.
+    /// This method only defines the Indexing-owned payload boundary required
+    /// because `IndexEvent` contains fields that are intentionally not copied
+    /// into Core's universal envelope. The returned bytes are not a second
+    /// event envelope and do not contain a second EventId, MessageId,
+    /// OperationId, or CorrelationId.
+    pub fn control_plane_payload(&self) -> Result<Vec<u8>, IndexEventTransportError> {
+        encode_transport_payload(self)
+    }
+
+    /// Reconstructs an [`IndexEvent`] from a Core request carrying the explicit
+    /// Indexing transport payload produced by [`Self::control_plane_payload`].
+    ///
+    /// The supplied Core request is retained unchanged. In particular, this
+    /// method never creates a replacement Core identity or operation context.
+    pub fn from_control_plane_request(
+        request: UniversalRequest,
+    ) -> Result<Self, IndexEventTransportError> {
+        let payload = request.universal_event().envelope.payload.bytes();
+        let (entity_type, requirement, object_reference, key_material, source_payload) =
+            decode_transport_payload(payload)?;
+
+        let event = Self {
+            request,
+            entity_type,
+            requirement,
+            object_reference,
+            key_material,
+            source_payload_override: Some(source_payload),
+        };
+
+        event
+            .validate()
+            .map_err(IndexEventTransportError::InvalidEvent)?;
+        Ok(event)
+    }
+}
+
+/// Errors produced while encoding or decoding the explicit IndexEvent
+/// Control Plane payload boundary.
+#[derive(Debug, Eq, PartialEq)]
+pub enum IndexEventTransportError {
+    /// The payload does not contain the Indexing transport magic/version.
+    InvalidHeader,
+    /// The payload ended before a complete value could be read.
+    Truncated,
+    /// A length/count would exceed the transport decoder's safety bounds.
+    InvalidLength,
+    /// A tagged value contains an unknown variant.
+    InvalidTag(u8),
+    /// A length-delimited value was not valid UTF-8.
+    InvalidUtf8,
+    /// The reconstructed IndexEvent failed its normal logical validation.
+    InvalidEvent(IndexEventValidationError),
+    /// A nested key-material value exceeded the supported nesting depth.
+    KeyMaterialDepthExceeded,
+}
+
+impl fmt::Display for IndexEventTransportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidHeader => formatter.write_str("invalid IndexEvent transport header"),
+            Self::Truncated => formatter.write_str("truncated IndexEvent transport payload"),
+            Self::InvalidLength => formatter.write_str("invalid IndexEvent transport length"),
+            Self::InvalidTag(tag) => write!(formatter, "invalid IndexEvent transport tag {tag}"),
+            Self::InvalidUtf8 => formatter.write_str("IndexEvent transport value is not UTF-8"),
+            Self::InvalidEvent(error) => {
+                write!(formatter, "invalid transported IndexEvent: {error}")
+            }
+            Self::KeyMaterialDepthExceeded => {
+                formatter.write_str("transported key material exceeds the maximum nesting depth")
+            }
+        }
+    }
+}
+
+impl Error for IndexEventTransportError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidEvent(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+const TRANSPORT_MAGIC: &[u8; 4] = b"NIZE";
+const TRANSPORT_VERSION: u8 = 1;
+const MAX_TRANSPORT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TRANSPORT_ITEMS: usize = 4096;
+
+fn encode_transport_payload(event: &IndexEvent) -> Result<Vec<u8>, IndexEventTransportError> {
+    event
+        .validate()
+        .map_err(IndexEventTransportError::InvalidEvent)?;
+
+    let mut writer = TransportWriter::new();
+    writer.bytes(TRANSPORT_MAGIC);
+    writer.u8(TRANSPORT_VERSION);
+    writer.string(event.entity_type().as_str())?;
+
+    let requirement = event.requirement();
+    writer.string(requirement.namespace().as_str())?;
+    writer.u8(match requirement.family() {
+        IndexFamily::Identity => 0,
+        IndexFamily::Inverted => 1,
+        IndexFamily::Relationship => 2,
+        IndexFamily::Similarity => 3,
+    });
+    writer.u32(requirement.key_definition().fields().len())?;
+    for field in requirement.key_definition().fields() {
+        writer.string(field.name())?;
+    }
+    writer.string(requirement.target_reference_type().as_str())?;
+    writer.u8(match requirement.uniqueness() {
+        Uniqueness::Unique => 0,
+        Uniqueness::NonUnique => 1,
+    });
+    writer.string(requirement.consistency_requirement().as_str())?;
+    writer.optional_string(requirement.source_version().map(SourceVersion::as_str))?;
+    writer.optional_string(requirement.schema_version().map(SchemaVersion::as_str))?;
+
+    writer.string(event.object_reference().source())?;
+    writer.string(event.object_reference().object_reference())?;
+    writer.key_material(event.key_material(), 0)?;
+    writer.bytes_value(event.source_payload())?;
+
+    Ok(writer.finish())
+}
+
+fn decode_transport_payload(
+    payload: &[u8],
+) -> Result<
+    (
+        EntityType,
+        IndexRequirement,
+        ObjectReference,
+        KeyMaterial,
+        Vec<u8>,
+    ),
+    IndexEventTransportError,
+> {
+    if payload.len() > MAX_TRANSPORT_BYTES {
+        return Err(IndexEventTransportError::InvalidLength);
+    }
+
+    let mut reader = TransportReader::new(payload);
+    if reader.take(4)? != TRANSPORT_MAGIC {
+        return Err(IndexEventTransportError::InvalidHeader);
+    }
+    if reader.u8()? != TRANSPORT_VERSION {
+        return Err(IndexEventTransportError::InvalidHeader);
+    }
+
+    let entity_type = EntityType::new(reader.string()?).map_err(|error| {
+        IndexEventTransportError::InvalidEvent(IndexEventValidationError::InvalidEntityType(error))
+    })?;
+
+    let namespace = IndexNamespace::new(reader.string()?)
+        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+
+    let family = match reader.u8()? {
+        0 => IndexFamily::Identity,
+        1 => IndexFamily::Inverted,
+        2 => IndexFamily::Relationship,
+        3 => IndexFamily::Similarity,
+        tag => return Err(IndexEventTransportError::InvalidTag(tag)),
+    };
+
+    let field_count = reader.count()?;
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        fields.push(reader.string()?);
+    }
+    let key_definition = KeyDefinition::new(fields).map_err(|error| {
+        IndexEventTransportError::InvalidEvent(IndexEventValidationError::InvalidRequirement(
+            IndexRequirementValidationError::InvalidKeyDefinition(error),
+        ))
+    })?;
+
+    let target_reference_type = TargetReferenceType::new(reader.string()?)
+        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+
+    let uniqueness = match reader.u8()? {
+        0 => Uniqueness::Unique,
+        1 => Uniqueness::NonUnique,
+        tag => return Err(IndexEventTransportError::InvalidTag(tag)),
+    };
+    let consistency_requirement = ConsistencyRequirement::new(reader.string()?)
+        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+    let source_version = reader
+        .optional_string()?
+        .map(SourceVersion::new)
+        .transpose()
+        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+    let schema_version = reader
+        .optional_string()?
+        .map(SchemaVersion::new)
+        .transpose()
+        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+
+    let requirement = IndexRequirement::new(
+        namespace,
+        family,
+        key_definition,
+        target_reference_type,
+        uniqueness,
+        consistency_requirement,
+        source_version,
+        schema_version,
+    )
+    .map_err(IndexEventValidationError::InvalidRequirement)
+    .map_err(IndexEventTransportError::InvalidEvent)?;
+
+    let object_reference =
+        ObjectReference::new(reader.string()?, reader.string()?).map_err(|error| {
+            IndexEventTransportError::InvalidEvent(
+                IndexEventValidationError::InvalidObjectReference(error),
+            )
+        })?;
+    let key_material = reader.key_material(0)?;
+    let source_payload = reader.bytes_value()?;
+
+    if !reader.is_finished() {
+        return Err(IndexEventTransportError::InvalidLength);
+    }
+
+    Ok((
+        entity_type,
+        requirement,
+        object_reference,
+        key_material,
+        source_payload,
+    ))
+}
+
+struct TransportWriter {
+    bytes: Vec<u8>,
+}
+
+impl TransportWriter {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+    }
+
+    fn u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn u32(&mut self, value: usize) -> Result<(), IndexEventTransportError> {
+        let value = u32::try_from(value).map_err(|_| IndexEventTransportError::InvalidLength)?;
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    fn string(&mut self, value: &str) -> Result<(), IndexEventTransportError> {
+        self.bytes_value(value.as_bytes())
+    }
+
+    fn optional_string(&mut self, value: Option<&str>) -> Result<(), IndexEventTransportError> {
+        match value {
+            Some(value) => {
+                self.u8(1);
+                self.string(value)?;
+            }
+            None => self.u8(0),
+        }
+        Ok(())
+    }
+
+    fn bytes_value(&mut self, value: &[u8]) -> Result<(), IndexEventTransportError> {
+        self.u32(value.len())?;
+        self.bytes.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn key_material(
+        &mut self,
+        value: &KeyMaterial,
+        depth: usize,
+    ) -> Result<(), IndexEventTransportError> {
+        if depth > crate::index::key::KEY_MATERIAL_MAX_DEPTH {
+            return Err(IndexEventTransportError::KeyMaterialDepthExceeded);
+        }
+
+        match value {
+            KeyMaterial::Null => self.u8(0),
+            KeyMaterial::Bool(value) => {
+                self.u8(1);
+                self.u8(u8::from(*value));
+            }
+            KeyMaterial::Integer(value) => {
+                self.u8(2);
+                self.bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            KeyMaterial::Unsigned(value) => {
+                self.u8(3);
+                self.bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            KeyMaterial::Text(value) => {
+                self.u8(4);
+                self.string(value)?;
+            }
+            KeyMaterial::Bytes(value) => {
+                self.u8(5);
+                self.bytes_value(value)?;
+            }
+            KeyMaterial::Sequence(values) => {
+                self.u8(6);
+                self.u32(values.len())?;
+                for value in values {
+                    self.key_material(value, depth + 1)?;
+                }
+            }
+            KeyMaterial::Map(values) => {
+                self.u8(7);
+                self.u32(values.len())?;
+                for (name, value) in values {
+                    self.string(name)?;
+                    self.key_material(value, depth + 1)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct TransportReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> TransportReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], IndexEventTransportError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(IndexEventTransportError::InvalidLength)?;
+        if end > self.bytes.len() {
+            return Err(IndexEventTransportError::Truncated);
+        }
+        let value = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> Result<u8, IndexEventTransportError> {
+        Ok(*self
+            .take(1)?
+            .first()
+            .ok_or(IndexEventTransportError::Truncated)?)
+    }
+
+    fn u32(&mut self) -> Result<u32, IndexEventTransportError> {
+        let bytes = self.take(4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn count(&mut self) -> Result<usize, IndexEventTransportError> {
+        let value = self.u32()? as usize;
+        if value > MAX_TRANSPORT_ITEMS {
+            return Err(IndexEventTransportError::InvalidLength);
+        }
+        Ok(value)
+    }
+
+    fn string(&mut self) -> Result<String, IndexEventTransportError> {
+        let bytes = self.bytes_value()?;
+        String::from_utf8(bytes).map_err(|_| IndexEventTransportError::InvalidUtf8)
+    }
+
+    fn optional_string(&mut self) -> Result<Option<String>, IndexEventTransportError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.string()?)),
+            tag => Err(IndexEventTransportError::InvalidTag(tag)),
+        }
+    }
+
+    fn bytes_value(&mut self) -> Result<Vec<u8>, IndexEventTransportError> {
+        let length = self.u32()? as usize;
+        if length > MAX_TRANSPORT_BYTES || length > self.bytes.len().saturating_sub(self.offset) {
+            return Err(IndexEventTransportError::InvalidLength);
+        }
+        Ok(self.take(length)?.to_vec())
+    }
+
+    fn key_material(&mut self, depth: usize) -> Result<KeyMaterial, IndexEventTransportError> {
+        if depth > crate::index::key::KEY_MATERIAL_MAX_DEPTH {
+            return Err(IndexEventTransportError::KeyMaterialDepthExceeded);
+        }
+
+        match self.u8()? {
+            0 => Ok(KeyMaterial::Null),
+            1 => Ok(KeyMaterial::Bool(match self.u8()? {
+                0 => false,
+                1 => true,
+                tag => return Err(IndexEventTransportError::InvalidTag(tag)),
+            })),
+            2 => {
+                let bytes = self.take(16)?;
+                Ok(KeyMaterial::Integer(i128::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )))
+            }
+            3 => {
+                let bytes = self.take(16)?;
+                Ok(KeyMaterial::Unsigned(u128::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )))
+            }
+            4 => Ok(KeyMaterial::Text(self.string()?)),
+            5 => Ok(KeyMaterial::Bytes(self.bytes_value()?)),
+            6 => {
+                let count = self.count()?;
+                let mut values = Vec::with_capacity(count);
+                for _ in 0..count {
+                    values.push(self.key_material(depth + 1)?);
+                }
+                Ok(KeyMaterial::Sequence(values))
+            }
+            7 => {
+                let count = self.count()?;
+                let mut values = BTreeMap::new();
+                for _ in 0..count {
+                    let name = self.string()?;
+                    let value = self.key_material(depth + 1)?;
+                    if values.insert(name, value).is_some() {
+                        return Err(IndexEventTransportError::InvalidLength);
+                    }
+                }
+                KeyMaterial::map(values).map_err(|_| IndexEventTransportError::InvalidLength)
+            }
+            tag => Err(IndexEventTransportError::InvalidTag(tag)),
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
     }
 }
 
@@ -437,6 +906,117 @@ mod tests {
         assert_eq!(event.message_id(), &message_id);
         assert_eq!(event.operation_context(), &operation);
         assert_eq!(event.source_payload(), b"source-owned-payload");
+    }
+
+    #[test]
+    fn control_plane_transport_round_trip_preserves_core_identity_and_indexing_fields() {
+        let source = EngineId::new("nizaam.source.test").expect("source id must be valid");
+        let request = request(source, None);
+        let original_event_id = request.event_id().clone();
+        let original_message_id = request.message_id().clone();
+        let original_operation = request.universal_event().envelope.operation_context.clone();
+        let original = IndexEvent::new(
+            request,
+            EntityType::new("semantic").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::Sequence(vec![KeyMaterial::text("term"), KeyMaterial::Unsigned(7)]),
+        )
+        .expect("event must be valid");
+
+        let transport_payload = original
+            .control_plane_payload()
+            .expect("transport encoding must succeed");
+        let envelope = &original.universal_event().envelope;
+        let transport_request = UniversalRequest::new(MessageEnvelope::new(
+            envelope.message_id.clone(),
+            envelope.operation_context.clone(),
+            envelope.metadata.clone(),
+            EncodedPayload::new(
+                envelope.metadata.descriptor.payload.clone(),
+                transport_payload,
+            ),
+        ));
+        let transport_event_id = transport_request.event_id().clone();
+        let reconstructed = IndexEvent::from_control_plane_request(transport_request)
+            .expect("transport reconstruction must succeed");
+
+        assert_eq!(reconstructed.event_id(), &transport_event_id);
+        assert_eq!(reconstructed.message_id(), &original_message_id);
+        assert_eq!(reconstructed.operation_context(), &original_operation);
+        assert_ne!(reconstructed.event_id(), &original_event_id);
+        assert_eq!(reconstructed.entity_type(), original.entity_type());
+        assert_eq!(reconstructed.requirement(), original.requirement());
+        assert_eq!(
+            reconstructed.object_reference(),
+            original.object_reference()
+        );
+        assert_eq!(reconstructed.key_material(), original.key_material());
+        assert_eq!(reconstructed.source_payload(), original.source_payload());
+    }
+
+    #[test]
+    fn control_plane_transport_rejects_truncated_payload() {
+        let event = IndexEvent::new(
+            request(
+                EngineId::new("nizaam.source.test").expect("source id must be valid"),
+                None,
+            ),
+            EntityType::new("word").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::text("term"),
+        )
+        .expect("event must be valid");
+
+        let mut payload = event
+            .control_plane_payload()
+            .expect("transport encoding must succeed");
+        payload.pop();
+
+        let envelope = &event.universal_event().envelope;
+        let transport_request = UniversalRequest::new(MessageEnvelope::new(
+            envelope.message_id.clone(),
+            envelope.operation_context.clone(),
+            envelope.metadata.clone(),
+            EncodedPayload::new(envelope.metadata.descriptor.payload.clone(), payload),
+        ));
+
+        assert!(matches!(
+            IndexEvent::from_control_plane_request(transport_request),
+            Err(IndexEventTransportError::Truncated | IndexEventTransportError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn control_plane_transport_keeps_source_payload_opaque_to_indexing_metadata() {
+        let event = IndexEvent::new(
+            request(
+                EngineId::new("nizaam.source.test").expect("source id must be valid"),
+                None,
+            ),
+            EntityType::new("word").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::text("term"),
+        )
+        .expect("event must be valid");
+
+        let payload = event
+            .control_plane_payload()
+            .expect("transport encoding must succeed");
+        let envelope = &event.universal_event().envelope;
+        let request = UniversalRequest::new(MessageEnvelope::new(
+            envelope.message_id.clone(),
+            envelope.operation_context.clone(),
+            envelope.metadata.clone(),
+            EncodedPayload::new(envelope.metadata.descriptor.payload.clone(), payload),
+        ));
+        let reconstructed = IndexEvent::from_control_plane_request(request)
+            .expect("transport reconstruction must succeed");
+
+        assert_eq!(reconstructed.source_payload(), b"source-owned-payload");
+        assert_eq!(reconstructed.entity_type().as_str(), "word");
     }
 
     #[test]

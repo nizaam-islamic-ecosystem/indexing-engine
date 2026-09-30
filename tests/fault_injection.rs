@@ -973,7 +973,8 @@ fn phase6_selected_destination_cannot_bypass_core_runtime_admission() {
             .expect("engine id should be valid"),
         nizaam_core::identity::EngineInstanceId::new("nizaam.indexing.phase6.fault.instance")
             .expect("engine instance id should be valid"),
-    );
+    )
+    .expect("default IndexingEngine construction should resolve a platform home directory");
 
     engine.start().expect("engine should start");
     engine

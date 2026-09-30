@@ -5,12 +5,15 @@
 //! They do not introduce a second retry scheduler, deserialize IndexEvent
 //! snapshots, or mark operations completed.
 
+mod common;
+
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use nizaam_indexing::engine::runtime::IndexEventHandlingError;
 use nizaam_indexing::recovery::execution::{
     PersistedRecoveryOperation, RecoveryAction, RecoveryExecutionError, RecoveryExecutor,
     RecoveryHandler, RecoveryRequest, scan_incomplete_operations,
@@ -474,6 +477,66 @@ fn recovery_discovery_does_not_mutate_the_journal() {
     assert_eq!(after, before);
 
     cleanup_root(&root);
+}
+
+#[test]
+fn recovery_discovers_an_unfinished_assignment_written_by_index_event_execution() {
+    let root = common::test_operation_root();
+    let engine = common::engine_with_operation_root(
+        common::test_engine_id(),
+        common::test_engine_instance_id(),
+        root.clone(),
+    );
+    let registry = common::engine_registry();
+
+    engine.start().expect("engine startup should succeed");
+    engine
+        .begin_registration()
+        .expect("engine should enter registration");
+    common::register_engine(&engine, &registry).expect("engine registration should succeed");
+
+    let capability =
+        common::capability_definition(&common::test_engine_id(), &common::test_capability_id());
+    engine
+        .register_capability(
+            capability,
+            common::failing_handler("recovery discovery test failure"),
+        )
+        .expect("failing test capability should register");
+    engine
+        .register_phase0_capability()
+        .expect("Phase 0 capability should register");
+    engine.mark_ready().expect("engine should become ready");
+    engine.serve().expect("engine should enter serving state");
+
+    let event = common::test_index_event("recovery-runtime-written");
+    let error = engine
+        .handle_index_event(
+            &event,
+            &common::test_index_definition(),
+            &common::test_capacity_accounting(),
+            common::test_index_event_capacity_request(),
+        )
+        .expect_err("the failing handler should leave an unfinished assignment");
+
+    assert!(matches!(error, IndexEventHandlingError::Capability(_)));
+
+    let operations =
+        scan_incomplete_operations(&root).expect("runtime-written started journal should scan");
+
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].event_id(), event.event_id().as_str());
+    assert_eq!(
+        operations[0].operation_id(),
+        event.operation_context().operation.id.as_str(),
+    );
+    assert!(
+        operations[0].event_snapshot().is_file(),
+        "recovery must discover the event snapshot actually written by IndexEvent execution",
+    );
+
+    engine.shutdown().expect("engine shutdown should succeed");
+    common::remove_test_operation_root(&root);
 }
 
 #[test]

@@ -167,7 +167,12 @@ fn report_independent_concurrency_probe(
     let invocations = invocation_count(counter);
 
     eprintln!(
-        "[concurrency probe] requested={requested}, successful={successful},          failed={failed}, handler_invocations={invocations}"
+        "[concurrency probe] requested={requested}, successful={successful}, failed={failed}, handler_invocations={invocations}"
+    );
+
+    assert!(
+        successful > 0,
+        "concurrency probe must complete at least one independent IndexEvent successfully; requested={requested}, failed={failed}",
     );
 }
 

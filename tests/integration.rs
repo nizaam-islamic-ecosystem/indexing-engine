@@ -54,12 +54,19 @@
 //! observability system. Security-context propagation into the Indexing
 //! capability is intentionally not asserted here until the public request
 //! boundary accepts the same Core EngineContext established by middleware.
+//!
+//! Phase 6 IndexEvent coverage additionally verifies the Control Plane-facing
+//! typed ingress: a Core UniversalRequest carrying the explicit Indexing payload
+//! boundary is reconstructed into IndexEvent and handed to the existing durable
+//! execution path without introducing a second runtime or identity protocol.
 
 mod common;
 
 use common::{
-    contract_id, engine_id, engine_registry, operation_context, register_engine, test_engine,
-    universal_request,
+    capability_definition, contract_id, control_plane_request_for_event, counting_echo_handler,
+    engine_id, engine_registry, invocation_count, invocation_counter, operation_context,
+    register_engine, test_capability_id, test_capacity_accounting, test_engine, test_engine_id,
+    test_index_definition, test_index_event, test_index_event_capacity_request, universal_request,
 };
 use nizaam_core::capability::CapabilityError;
 use nizaam_core::contracts::{
@@ -366,12 +373,14 @@ fn independent_engine_instances_keep_their_complete_integration_state_separate()
         engine_id("nizaam.indexing.integration.shared"),
         EngineInstanceId::new("nizaam.indexing.integration.instance.1")
             .expect("test instance id must be valid"),
-    );
+    )
+    .expect("default IndexingEngine construction should resolve a platform home directory");
     let second = IndexingEngine::new(
         engine_id("nizaam.indexing.integration.shared"),
         EngineInstanceId::new("nizaam.indexing.integration.instance.2")
             .expect("test instance id must be valid"),
-    );
+    )
+    .expect("default IndexingEngine construction should resolve a platform home directory");
 
     assert_eq!(first.engine_id(), second.engine_id());
     assert_ne!(first.engine_instance_id(), second.engine_instance_id());
@@ -1663,6 +1672,62 @@ fn phase6_core_health_observation_does_not_mutate_indexing_lifecycle() {
     assert_eq!(index_lifecycle.state(), IndexLifecycleState::Active);
 
     engine.shutdown().expect("engine shutdown should succeed");
+}
+
+#[test]
+fn phase6_control_plane_index_event_ingress_reconstructs_and_executes_the_typed_event() {
+    let engine = test_engine();
+    let registry = engine_registry();
+    let counter = invocation_counter();
+
+    engine.start().expect("startup should succeed");
+    engine
+        .begin_registration()
+        .expect("registration lifecycle entry should succeed");
+    register_engine(&engine, &registry).expect("engine registration should succeed");
+    engine
+        .register_capability(
+            capability_definition(&test_engine_id(), &test_capability_id()),
+            counting_echo_handler(counter.clone()),
+        )
+        .expect("IndexEvent capability registration should succeed");
+    engine
+        .register_phase0_capability()
+        .expect("Phase 0 capability registration should succeed");
+    engine
+        .mark_ready()
+        .expect("ready transition should succeed");
+    engine.serve().expect("serving transition should succeed");
+
+    let event = test_index_event("integration-phase6-control-plane-ingress");
+    let request = control_plane_request_for_event(&event);
+    let expected_message_id = request.message_id().clone();
+    let expected_event_id = request.event_id().clone();
+    let expected_operation = request.universal_event().envelope.operation_context.clone();
+
+    let response = engine
+        .handle_control_plane_index_event(
+            &request,
+            &test_index_definition(),
+            &test_capacity_accounting(),
+            test_index_event_capacity_request(),
+        )
+        .expect("Control Plane IndexEvent ingress should execute successfully");
+
+    assert_eq!(response.event().message_id(), &expected_message_id);
+    assert_eq!(response.event().event_id(), &expected_event_id);
+    assert_eq!(response.event().operation_context(), &expected_operation);
+    assert_eq!(response.event().entity_type(), event.entity_type());
+    assert_eq!(response.event().requirement(), event.requirement());
+    assert_eq!(
+        response.event().object_reference(),
+        event.object_reference()
+    );
+    assert_eq!(response.event().key_material(), event.key_material());
+    assert_eq!(response.event().source_payload(), event.source_payload());
+    assert_eq!(invocation_count(&counter), 1);
+
+    engine.shutdown().expect("shutdown should succeed");
 }
 
 #[test]

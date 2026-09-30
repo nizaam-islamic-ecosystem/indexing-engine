@@ -632,6 +632,27 @@ pub fn index_event(
     .expect("test IndexEvent must be valid")
 }
 
+/// Rebuilds an IndexEvent's Core envelope as a Control Plane request carrying
+/// the explicit Indexing transport payload. Core message, operation, participant,
+/// contract, and capability metadata are retained; only the transport payload
+/// is replaced with the versioned IndexEvent payload boundary.
+#[must_use]
+pub fn control_plane_request_for_event(event: &IndexEvent) -> UniversalRequest {
+    let payload = event
+        .control_plane_payload()
+        .expect("test IndexEvent transport payload must encode");
+
+    let envelope = event.universal_event().envelope.clone();
+    let descriptor = envelope.metadata.descriptor.payload.clone();
+
+    UniversalRequest::new(MessageEnvelope::new(
+        event.message_id().clone(),
+        event.operation_context().clone(),
+        envelope.metadata,
+        EncodedPayload::new(descriptor, payload),
+    ))
+}
+
 /// Creates the standard capacity accounting used by IndexEvent integration tests.
 #[must_use]
 pub fn test_capacity_accounting() -> CapacityAccounting {
