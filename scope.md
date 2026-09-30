@@ -14238,7 +14238,7 @@ The final objective is to prove that the complete Indexing Engine can operate sa
 
 #### 1. Phase 6 Architectural Position
 
-The seven-phase progression is:
+The seven numbered implementation phases are:
 
 ```text
 Phase 0
@@ -15254,38 +15254,35 @@ The observability and integration layers must not introduce unbounded resource b
 
 ---
 
-#### 29. Planned Source Tree
+#### 29. Phase 6 Source Surface
+
+The following was the Phase 6-specific source surface described by the original
+plan:
 
 ```text
 src/
 ├── security/
-│   ├── mod.rs
-│   └── authorization.rs
-│
 ├── observability/
-│   ├── mod.rs
-│   ├── logging.rs
-│   ├── metrics.rs
-│   ├── tracing.rs
-│   └── diagnostics.rs
-│
 ├── engine/
-│   ├── registration.rs
-│   ├── runtime.rs
-│   └── capability.rs
-│
 └── lib.rs
 ```
 
-Phase 6 primarily hardens and integrates existing modules rather than introducing a large new subsystem.
+This is a **historical phase plan**, not the current repository tree. Later
+implementation work expanded the real source tree with event, configuration,
+provider, recovery, build, consistency, query, capacity, integrity, lifecycle,
+identity, index, and requirement modules. The current repository structure is
+documented in the repository structure section near the end of this document.
 
-The earlier `engine/` files are updated only as necessary to prove final cross-boundary behavior.
-
-Event, health, Control Plane, and Core runtime integrations are verified through their public interfaces and should not automatically result in Indexing-owned duplicate subsystems.
+Event, health, Control Plane, and Core runtime integrations remain Core-backed;
+their existence in the current tree does not imply a second Indexing-owned
+infrastructure system.
 
 ---
 
-#### 30. Planned Test Tree
+#### 30. Phase 6 Test Surface
+
+The original Phase 6 plan introduced the following repository-level test
+surface:
 
 ```text
 tests/
@@ -15297,6 +15294,10 @@ tests/
 ├── stress.rs
 └── e2e.rs
 ```
+
+This is the Phase 6 planned baseline. Additional repository-level tests added
+after Phase 6 are intentionally documented in the separate post-Phase 6
+completion section rather than being retroactively assigned to Phase 6.
 
 ---
 
@@ -15838,7 +15839,7 @@ Can the complete Indexing Engine safely participate
 in the full Nizaam infrastructure?
 ```
 
-Phase 6 is therefore the final integration, conformance, and hardening phase.
+Phase 6 is therefore the last numbered implementation phase. Additional foundational completion and hardening work performed after Phase 6 is documented separately below and is intentionally not assigned to another numbered phase.
 
 Its purpose is to prove that the work completed in Phases 0–5 correctly operates inside the Nizaam architecture, uses Core's existing universal mechanisms instead of duplicating them, preserves security and context boundaries, remains observable, integrates with health and configuration, communicates correctly with other engines, and survives the complete final verification suite.
 
@@ -16130,113 +16131,389 @@ without Indexing creating or interpreting their meaning;
 
 - no unauthorized architectural decisions were introduced.
 
-## Current Repository Scaffold
+## Post-Phase 6 Foundational Completion Work
 
-The current repository scaffold contains 20 directories and 84 files.
-The phase plans above map the existing implementation tree to the phase
-that owns each subsystem.
+Phase 6 remains the last **numbered** implementation phase in this scope.
+After Phase 6 ended, two additional bodies of foundational development were
+completed under branch/work names that were deliberately **not** called
+"Phase 7" or "Phase 8". They are recorded here as post-Phase 6 work rather
+than being inserted into an existing phase or given an artificial phase number.
 
-After the approved cleanup of semantic-mapping-owned modules, the target
-implementation scaffold is 19 directories and 77 files.
+### A. Index Event / Universal Communication Completion
 
-These counts describe the pre-provider target snapshot. The approved top-level
-provider abstraction is an additional architectural module, so the final
-implementation file/directory count must be updated once its exact internal
-file decomposition is frozen.
-
-The retained current src/ implementation areas are:
+The repository now contains a real Indexing-specific event contract layered on
+the existing Core universal event/request boundary:
 
 ```text
-
-src/
-
-├── bin/
-
-├── build/
-
-├── capacity/
-
-├── configuration/
-
-├── consistency/
-
-├── engine/
-
-├── identity/
-
-├── index/
-
-├── integrity/
-
-├── lifecycle/
-
-├── observability/
-
-├── provider/
-
-├── query/
-
-├── recovery/
-
-├── requirement/
-
-└── security/
-
+src/event/
+├── mod.rs
+├── index_event.rs
+└── index_event_response.rs
 ```
 
-The semantic mapping/ module is intentionally absent from the target
-tree.
+Implemented responsibilities include:
 
-The retained test areas are:
+- `IndexEvent` as the Indexing-owned logical event contract.
+- Preservation of Core event/message/operation identity instead of creating
+  duplicate transport identities.
+- Indexing-owned fields such as entity type, requirement, object reference,
+  and key material.
+- Conversion through the existing Core `UniversalRequest` / `UniversalEvent`
+  boundary.
+- `IndexEventResponse` for Indexing-owned result content while preserving the
+  existing Core response boundary.
+- Control Plane / Core communication round-trip coverage for Indexing event
+  content and source payload.
+- Malformed event payload rejection before IndexEvent reconstruction.
+- Explicit separation between Indexing logical event content and Core-owned
+  serialization, framing, transport, routing, and universal event identity.
+
+The implementation deliberately does **not** create an Indexing transport,
+event bus, framing layer, or second universal event identity system.
+
+### B. Durable Execution / Recovery Completion and Foundational Hardening
+
+The repository also contains a completed durable execution/recovery test and
+hardening surface that goes beyond the original Phase 5/6 planning text:
 
 ```text
+src/recovery/
+├── mod.rs
+├── execution.rs
+└── failure.rs
+```
 
+and additional repository tests:
+
+```text
 tests/
-
-├── build.rs
-
-├── capacity.rs
-
-├── common/
-
-├── configuration.rs
-
-├── conformance.rs
-
-├── consistency.rs
-
-├── e2e.rs
-
-├── engine.rs
-
-├── fault_injection.rs
-
-├── identity.rs
-
-├── index.rs
-
-├── integration.rs
-
-├── integrity.rs
-
-├── lifecycle.rs
-
-├── observability.rs
-
-├── query.rs
-
-├── recovery.rs
-
-├── requirement.rs
-
-├── security.rs
-
-└── stress.rs
-
+├── persistence_faults.rs
+├── recovery_execution.rs
+└── idempotency.rs
 ```
 
-The semantic tests/mapping.rs test target is intentionally absent.
+The implemented behavior covers:
 
-The presence of a retained file or folder in this scaffold does not mean
-that its phase is implemented. It identifies the intended implementation
-location for the phase mapping above.
+- durable operation records for IndexEvent execution;
+- event and response snapshots;
+- started/completed journal records;
+- operation locking and duplicate/in-progress detection;
+- deterministic discovery of incomplete operations;
+- recovery execution dispatch;
+- preservation of the known-good active version;
+- failure classification and deterministic recovery actions;
+- persistence failure injection at snapshot, journal, lock, and completion
+  boundaries;
+- prevention of false completion after partial persistence failure;
+- rejection of already-completed operations;
+- idempotent repeated submission handling;
+- recovery behavior across a fresh engine instance;
+- E2E verification of durable operation state.
+
+These are foundational completion/hardening capabilities added after the
+numbered Phase 0–6 progression. They must not be described as a new numbered
+phase unless the architecture is intentionally re-phased later.
+
+### Post-Phase 6 architectural rule
+
+The post-Phase 6 work does not change the ownership model:
+
+```text
+Core
+→ universal infrastructure, runtime, communication, transport, framing,
+  universal identity, lifecycle, capability dispatch
+
+Control Plane
+→ global coordination, discovery, routing and selection
+
+Indexing
+→ IndexEvent semantics, indexing contracts, durable indexing operation
+  behavior and indexing-specific recovery semantics
+
+Source engines
+→ domain meaning and source-owned payload semantics
+
+Provider
+→ physical indexing implementation
+```
+
+In particular, Indexing does **not** own Core message framing or transport.
+The Core framing boundary remains the authoritative **20 MB
+(20,000,000-byte)** message limit, and Core's fragment-count rules remain
+Core transport concerns. Indexing tests must not invent a separate framing
+limit or fragment protocol.
+
+---
+
+## Current Repository Structure
+
+The supplied repository snapshot was inspected directly. The archive contains
+**61 Rust source files** and **28 repository test/support Rust files**, with
+Windows `Zone.Identifier` sidecar entries excluded from the implementation
+count.
+
+The source tree currently contains these implementation modules:
+
+```text
+src/
+├── build/
+│   ├── batch.rs
+│   ├── builder.rs
+│   ├── mod.rs
+│   ├── publication.rs
+│   ├── rebuild.rs
+│   └── update.rs
+├── capacity/
+│   ├── accounting.rs
+│   ├── limits.rs
+│   └── mod.rs
+├── configuration/
+│   ├── config.rs
+│   └── mod.rs
+├── consistency/
+│   ├── mod.rs
+│   ├── policy.rs
+│   ├── synchronization.rs
+│   └── versioning.rs
+├── engine/
+│   ├── capability.rs
+│   ├── mod.rs
+│   ├── registration.rs
+│   └── runtime.rs
+├── event/
+│   ├── index_event.rs
+│   ├── index_event_response.rs
+│   └── mod.rs
+├── identity/
+│   ├── definition.rs
+│   ├── index.rs
+│   ├── mod.rs
+│   └── namespace.rs
+├── index/
+│   ├── definition.rs
+│   ├── entry.rs
+│   ├── family.rs
+│   ├── key.rs
+│   ├── mod.rs
+│   ├── query.rs
+│   ├── reference.rs
+│   ├── similarity.rs
+│   └── version.rs
+├── integrity/
+│   ├── mod.rs
+│   └── validation.rs
+├── lifecycle/
+│   ├── mod.rs
+│   └── state.rs
+├── observability/
+│   ├── diagnostics.rs
+│   ├── logging.rs
+│   ├── metrics.rs
+│   ├── mod.rs
+│   └── tracing.rs
+├── provider/
+│   ├── capabilities.rs
+│   ├── mod.rs
+│   └── ranking.rs
+├── query/
+│   ├── mod.rs
+│   ├── planner.rs
+│   ├── request.rs
+│   ├── result.rs
+│   └── retrieval.rs
+├── recovery/
+│   ├── execution.rs
+│   ├── failure.rs
+│   └── mod.rs
+├── requirement/
+│   ├── mod.rs
+│   └── requirement.rs
+├── security/
+│   ├── authorization.rs
+│   └── mod.rs
+├── error.rs
+└── lib.rs
+```
+
+The repository-level test surface is:
+
+```text
+tests/
+├── build.rs
+├── capacity.rs
+├── common/
+│   ├── helpers.rs
+│   └── mod.rs
+├── concurrency.rs
+├── configuration.rs
+├── conformance.rs
+├── consistency.rs
+├── e2e.rs
+├── engine.rs
+├── event.rs
+├── fault_injection.rs
+├── identity.rs
+├── idempotency.rs
+├── index.rs
+├── index_event.rs
+├── integration.rs
+├── integrity.rs
+├── lifecycle.rs
+├── observability.rs
+├── persistence.rs
+├── persistence_faults.rs
+├── query.rs
+├── recovery.rs
+├── recovery_execution.rs
+├── requirement.rs
+├── security.rs
+└── stress.rs
+```
+
+The archive contains no semantic-mapping implementation module and no
+`tests/mapping.rs` target.
+
+The actual source snapshot contains **604 `#[test]` functions in `src/`**
+and **388 `#[test]` functions under `tests/`**, for **992 discovered Rust
+test functions** in this archive. These counts replace the older Phase 6
+snapshot counts that no longer describe the current repository.
+
+### Repository structure corrections
+
+The following stale statements from the previous scope are no longer
+authoritative and have therefore been removed/replaced:
+
+- the old "20 directories and 84 files" repository count;
+- the old "19 directories and 77 files" target count;
+- the statement that the provider module was only an additional future module;
+- the omission of `src/event/` from the current source tree;
+- the omission of `tests/index_event.rs`;
+- the omission of `tests/concurrency.rs`;
+- the omission of `tests/idempotency.rs`;
+- the omission of `tests/persistence_faults.rs`;
+- the omission of `tests/recovery_execution.rs`;
+- the implication that the Phase 6 planned test tree is the complete current
+  test tree.
+
+The Phase 6 planned trees remain useful as historical phase planning
+information, but the **Current Repository Structure** above is the source of
+truth for the implementation snapshot being prepared for release.
+
+---
+
+## Current Completion State
+
+The numbered implementation progression remains:
+
+```text
+Phase 0 → Completed
+Phase 1 → Completed
+Phase 2 → Completed
+Phase 3 → Completed
+Phase 4 → Completed
+Phase 5 → Completed
+Phase 6 → Completed
+```
+
+The work completed after Phase 6 is intentionally tracked separately:
+
+```text
+Post-Phase 6
+├── Index Event / Universal Communication Completion
+└── Durable Execution / Recovery Completion and Foundational Hardening
+```
+
+These are not additional numbered phases. They are completion work performed
+after the seven-phase architecture had already reached its Phase 6 boundary.
+
+The repository is therefore best described as:
+
+> A seven-phase Indexing Engine architecture with additional post-Phase 6
+> foundational communication, durable execution, recovery, idempotency,
+> persistence-fault, integration, stress, and E2E hardening work.
+
+The remaining unchecked verification items in the historical Phase 6 checklist
+must remain visible until they are actually verified. In particular, the
+current snapshot does not justify silently claiming that direct public
+Indexing entrypoints independently enforce the Core authorization pipeline,
+nor that every listed workspace-wide verification command has been executed.
+Those are verification claims, not assumptions.
+
+---
+
+## Cross-Phase Architectural Invariants
+
+These invariants apply to every numbered phase **and to all post-Phase 6
+completion work**.
+
+## 1. Identity separation
+
+```text
+Object Identity
+≠ Index Identity
+≠ Index Namespace
+≠ Index Definition Version
+≠ Physical Implementation Version
+```
+
+## 2. Semantic ownership
+
+```text
+KG / Domain Engine
+→ defines meaning, mappings, relationships, predicates
+
+Indexing
+→ defines indexing, index generation, storage, maintenance, retrieval,
+  and indexing-specific durable operation behavior
+
+Storage/provider
+→ defines physical persistence/implementation
+```
+
+Indexing must never become the owner of the semantic relationship model
+merely because it indexes relationship records.
+
+## 3. Core communication ownership
+
+```text
+Indexing
+→ creates/handles Indexing logical event content
+
+Core
+→ owns UniversalEvent, message identity, operation/correlation metadata,
+  serialization, framing, transport, Control Plane communication,
+  and fragment handling
+```
+
+Indexing must not create a second framing protocol or a second transport
+boundary.
+
+## 4. Durable operation ownership
+
+Indexing may own durable records describing its own indexing operations, but
+those records must preserve the Core identity/context boundary rather than
+inventing replacement universal identities.
+
+---
+
+## Release Readiness Boundary
+
+Before publishing the crate, the repository documentation should distinguish
+three different claims:
+
+```text
+Implementation completeness
+→ what source code exists
+
+Test coverage
+→ what executable tests exist
+
+Verification status
+→ which checks have actually been run and passed
+```
+
+The existence of the 992 discovered test functions does not by itself prove
+that the complete workspace test suite currently passes. Verification results
+must be updated from the actual release-candidate command output rather than
+inferred from the presence of tests.
+
