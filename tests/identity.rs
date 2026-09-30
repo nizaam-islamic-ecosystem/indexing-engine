@@ -11,12 +11,12 @@
 
 use nizaam_core::contracts::Version as CoreContractVersion;
 use nizaam_indexing::identity::{
-    IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexIdGenerationVersion, IndexNamespace,
-    NamespaceRegistry,
+    IndexAssignedId, IndexDefinitionId, IndexDefinitionIdentity, IndexId, IndexIdGenerationVersion,
+    IndexNamespace, NamespaceRegistry,
 };
 use nizaam_indexing::index::{
     IndexFamily, IndexVersion, IndexVersionId, KeyMaterial, ObjectReference, SchemaVersion,
-    SourceVersion,
+    SourceVersion, TargetReferenceType,
 };
 
 fn index_id(seed: u8) -> IndexId {
@@ -402,4 +402,34 @@ fn logical_identity_dimensions_can_coexist_without_being_interchangeable() {
     assert_eq!(version.id().as_str(), "documents-v1");
     assert_eq!(reference.source(), "documents");
     assert_eq!(reference.object_reference(), "document:77");
+}
+
+#[test]
+fn index_assigned_id_is_deterministic_for_the_same_target_identity() {
+    let target_type =
+        TargetReferenceType::new("documents.document").expect("target type must be valid");
+    let reference = object_reference("documents", "document:42");
+
+    let first = IndexAssignedId::generate(&target_type, &reference);
+    let second = IndexAssignedId::generate(&target_type, &reference);
+
+    assert_eq!(first, second);
+    assert_eq!(first.as_bytes().len(), 64);
+}
+
+#[test]
+fn index_assigned_id_changes_with_the_target_identity() {
+    let target_type =
+        TargetReferenceType::new("documents.document").expect("target type must be valid");
+    let alternate_type =
+        TargetReferenceType::new("quran.verse").expect("target type must be valid");
+    let first_reference = object_reference("documents", "document:42");
+    let second_reference = object_reference("documents", "document:43");
+
+    let base = IndexAssignedId::generate(&target_type, &first_reference);
+    let type_changed = IndexAssignedId::generate(&alternate_type, &first_reference);
+    let reference_changed = IndexAssignedId::generate(&target_type, &second_reference);
+
+    assert_ne!(base, type_changed);
+    assert_ne!(base, reference_changed);
 }

@@ -500,3 +500,22 @@ fn phase3_multiple_candidate_states_remain_independently_trackable() {
         nizaam_indexing::index::VersionLifecycle::Building
     );
 }
+
+#[test]
+fn index_definition_identity_accessors_preserve_the_complete_logical_identity() {
+    let definition = definition();
+
+    let identity = IndexDefinitionIdentity::new(
+        definition.definition_id().clone(),
+        definition.namespace().clone(),
+        definition.family(),
+    );
+
+    assert_eq!(definition.identity(), &identity);
+    assert_eq!(
+        definition.identity().definition_id(),
+        definition.definition_id()
+    );
+    assert_eq!(definition.identity().namespace(), definition.namespace());
+    assert_eq!(definition.identity().family(), definition.family());
+}

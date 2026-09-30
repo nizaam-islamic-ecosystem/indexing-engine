@@ -37,18 +37,27 @@
 //! routing state, then exercise routing policy over candidates derived from
 //! that state without fabricating eligibility metadata.
 //!
-//! The Indexing Engine currently exposes `handle_request` as its public request
-//! execution boundary. Security is therefore composed immediately around that
-//! boundary in this E2E test through the real Core `ExecutionPipeline`.
+//! The Indexing Engine exposes both the universal `handle_request` boundary and
+//! the typed `handle_index_event` execution path. The E2E tests exercise both
+//! paths and, for IndexEvent execution, inspect the real durable filesystem
+//! artifacts owned by Indexing.
 //!
 //! This test does not invent an Indexing-owned middleware or runtime.
 
-use nizaam_indexing::engine::runtime::IndexingEngine;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+mod common;
+
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
+use nizaam_indexing::engine::runtime::{IndexEventHandlingError, IndexingEngine};
+use nizaam_indexing::identity::IndexId;
+
+use nizaam_core::capability::{CapabilityHandler, CapabilityOutcome, arc_handler};
 use nizaam_core::contracts::descriptor::{
     ContractDescriptor, EncodedPayload, Interaction, PayloadDescriptor, Version,
 };
@@ -81,6 +90,7 @@ const ENGINE_INSTANCE_ID: &str = "nizaam.indexing.e2e.instance";
 const CAPABILITY_ID: &str = "nizaam.indexing.phase0.probe";
 const CONTRACT_ID: &str = "nizaam.indexing.phase0.e2e";
 const MEDIA_TYPE: &str = "application/octet-stream";
+const E2E_SOURCE_PAYLOAD: &[u8] = b"e2e-index-event-payload";
 
 fn engine_id(value: &str) -> EngineId {
     EngineId::new(value).expect("test engine id must be valid")
@@ -156,7 +166,9 @@ fn control_plane_registration() -> EngineRegistration {
     EngineRegistration::new(engine_id(ENGINE_ID), instance_id(ENGINE_INSTANCE_ID))
 }
 
-fn prepare_engine() -> IndexingEngine {
+fn prepare_engine_with_handler(
+    extra_capability_handler: Option<Arc<dyn CapabilityHandler>>,
+) -> IndexingEngine {
     let engine = IndexingEngine::new(engine_id(ENGINE_ID), instance_id(ENGINE_INSTANCE_ID));
 
     let registry = EngineRegistry::new();
@@ -173,6 +185,14 @@ fn prepare_engine() -> IndexingEngine {
         .register_engine(&registry)
         .expect("engine registration must use Core registry");
 
+    if let Some(handler) = extra_capability_handler {
+        let capability =
+            common::capability_definition(&engine_id(ENGINE_ID), &common::test_capability_id());
+        engine
+            .register_capability(capability, handler)
+            .expect("E2E IndexEvent capability must register through Core");
+    }
+
     engine
         .register_phase0_capability()
         .expect("phase 0 capability must register through Core");
@@ -188,6 +208,67 @@ fn prepare_engine() -> IndexingEngine {
     assert!(registry.contains(engine.engine_instance_id()));
 
     engine
+}
+
+fn prepare_engine() -> IndexingEngine {
+    prepare_engine_with_handler(None)
+}
+
+fn prepare_index_event_engine(handler: Arc<dyn CapabilityHandler>) -> IndexingEngine {
+    prepare_engine_with_handler(Some(handler))
+}
+
+fn unique_e2e_name(prefix: &str) -> String {
+    static E2E_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let sequence = E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{}-{sequence}", std::process::id())
+}
+
+fn e2e_index_event(name: &str) -> nizaam_indexing::event::IndexEvent {
+    common::index_event(
+        name,
+        common::engine_id(common::TEST_SOURCE_ENGINE_ID),
+        Some(common::engine_instance_id(
+            "nizaam.indexing.test.source.instance",
+        )),
+        engine_id(ENGINE_ID),
+        Some(instance_id(ENGINE_INSTANCE_ID)),
+        "semantic",
+        common::test_index_requirement(),
+        common::test_object_reference("object:e2e"),
+        nizaam_indexing::index::KeyMaterial::text(format!("e2e-key-{name}")),
+        E2E_SOURCE_PAYLOAD,
+    )
+}
+
+fn e2e_index_id(event: &nizaam_indexing::event::IndexEvent) -> IndexId {
+    let definition = common::test_index_definition();
+    IndexId::generate(
+        definition.namespace(),
+        definition.definition_id(),
+        definition.family(),
+        event.key_material(),
+    )
+    .expect("E2E IndexId generation must succeed")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+
+    output
+}
+
+fn e2e_operation_directory(root: &std::path::Path, index_id: &IndexId) -> PathBuf {
+    root.join(format!(
+        "index-assignment-{}",
+        hex_encode(index_id.as_bytes())
+    ))
 }
 
 #[derive(Clone)]
@@ -476,4 +557,267 @@ fn e2e_control_plane_selection_does_not_override_runtime_admission() {
     );
 
     engine.shutdown().expect("draining engine must shut down");
+}
+
+#[test]
+fn e2e_index_assignment_persists_the_complete_durable_operation_record() {
+    let event = e2e_index_event(&unique_e2e_name("e2e-index-persistence"));
+    let definition = common::test_index_definition();
+    let index_id = e2e_index_id(&event);
+
+    // The lock is intentionally observed while the real capability handler is
+    // executing. `OperationLock::drop` removes the marker before
+    // `handle_index_event` returns, so checking only after execution would miss
+    // the fact that the lock was actually created.
+    let lock_observed = Arc::new(AtomicBool::new(false));
+    let lock_observed_by_handler = Arc::clone(&lock_observed);
+    let event_for_handler = event.clone();
+    let handler = arc_handler(move |_context, invocation| {
+        let home_dir = PathBuf::from(
+            std::env::var_os("HOME").expect("HOME must be set for the E2E default operation root"),
+        );
+        let root = home_dir.join(".nizaam").join("indexing");
+        let operation_directory = e2e_operation_directory(&root, &e2e_index_id(&event_for_handler));
+        let lock_directory = operation_directory.join("locks");
+        let lock_path = lock_directory.join(format!(
+            "event-{}.lock",
+            hex_encode(event_for_handler.event_id().as_str().as_bytes())
+        ));
+
+        assert!(
+            lock_directory.is_dir(),
+            "real Indexing execution must create the operation lock directory"
+        );
+        assert!(
+            lock_path.is_file(),
+            "real Indexing execution must create the per-event .lock file before capability dispatch"
+        );
+        lock_observed_by_handler.store(true, Ordering::SeqCst);
+        Ok(CapabilityOutcome::new(invocation.payload_bytes().to_vec()))
+    });
+
+    let engine = prepare_index_event_engine(handler);
+    let root = engine.operation_root().to_path_buf();
+
+    let response = engine
+        .handle_index_event(
+            &event,
+            &definition,
+            &common::test_capacity_accounting(),
+            common::test_index_event_capacity_request(),
+        )
+        .expect("real IndexEvent execution should succeed");
+
+    let operation_directory = e2e_operation_directory(&root, &index_id);
+    let lock_directory = operation_directory.join("locks");
+    let event_id = hex_encode(event.event_id().as_str().as_bytes());
+    let lock_path = lock_directory.join(format!("event-{event_id}.lock"));
+    let event_snapshot = operation_directory
+        .join("events")
+        .join(format!("received-{event_id}.snapshot"));
+    let response_snapshot = operation_directory
+        .join("responses")
+        .join(format!("response-{event_id}.snapshot"));
+    let journal = root.join(format!(
+        "index-assignment-{}.jsonl",
+        hex_encode(index_id.as_bytes())
+    ));
+
+    let home_dir = PathBuf::from(
+        std::env::var_os("HOME").expect("HOME must be set for the E2E default operation root"),
+    );
+    let expected_root = home_dir.join(".nizaam").join("indexing");
+
+    assert_eq!(root, expected_root);
+    assert!(
+        root.is_dir(),
+        "the runtime default operation root must exist"
+    );
+    assert!(operation_directory.is_dir());
+    assert!(
+        lock_directory.is_dir(),
+        "the operation locks directory must exist"
+    );
+    assert!(
+        lock_observed.load(Ordering::SeqCst),
+        "the capability handler must have observed the real lock"
+    );
+    assert!(event_snapshot.is_file());
+    assert!(response_snapshot.is_file());
+    assert!(journal.is_file());
+    assert!(
+        !lock_path.exists(),
+        "the ephemeral per-event lock file must be removed after execution completes"
+    );
+
+    let event_contents = common::read_test_file(&event_snapshot);
+    assert!(event_contents.starts_with("kind=IndexEvent\n"));
+    assert!(event_contents.contains(&format!("event_id={}\n", event.event_id().as_str())));
+    assert!(event_contents.contains(&format!(
+        "operation_id={}\n",
+        event.operation_context().operation.id.as_str()
+    )));
+    let expected_source_payload = hex_encode(E2E_SOURCE_PAYLOAD);
+    assert!(event_contents.contains(&format!("source_payload={expected_source_payload}\n")));
+
+    let response_contents = common::read_test_file(&response_snapshot);
+    assert!(response_contents.starts_with("kind=IndexEventResponse\n"));
+    assert!(response_contents.contains(&format!("event_id={}\n", event.event_id().as_str())));
+    assert!(response_contents.contains(&format!("assigned_id={}\n", response.assigned_id())));
+
+    let journal_contents = common::read_test_file(&journal);
+    assert_eq!(journal_contents.lines().count(), 2);
+    assert!(journal_contents.contains("\"status\":\"started\""));
+    assert!(journal_contents.contains("\"status\":\"completed\""));
+    assert!(journal_contents.contains(&*event_snapshot.to_string_lossy()));
+    assert!(journal_contents.contains(&*response_snapshot.to_string_lossy()));
+
+    for path in common::test_files_recursive(&root) {
+        assert_ne!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("tmp")
+        );
+        assert_ne!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("lock")
+        );
+    }
+
+    engine.shutdown().expect("engine shutdown should succeed");
+}
+
+#[test]
+fn e2e_failed_index_assignment_preserves_recovery_snapshot_without_completion() {
+    let engine = prepare_index_event_engine(common::failing_handler(
+        "E2E intentional capability failure",
+    ));
+    let root = engine.operation_root().to_path_buf();
+    let event = e2e_index_event(&unique_e2e_name("e2e-index-failure"));
+    let index_id = e2e_index_id(&event);
+    let definition = common::test_index_definition();
+
+    let error = engine
+        .handle_index_event(
+            &event,
+            &definition,
+            &common::test_capacity_accounting(),
+            common::test_index_event_capacity_request(),
+        )
+        .expect_err("failing capability must propagate through the real IndexEvent path");
+
+    assert!(matches!(error, IndexEventHandlingError::Capability(_)));
+
+    let operation_directory = e2e_operation_directory(&root, &index_id);
+    let event_id = hex_encode(event.event_id().as_str().as_bytes());
+    let event_snapshot = operation_directory
+        .join("events")
+        .join(format!("received-{event_id}.snapshot"));
+    let response_snapshot = operation_directory
+        .join("responses")
+        .join(format!("response-{event_id}.snapshot"));
+    let journal = root.join(format!(
+        "index-assignment-{}.jsonl",
+        hex_encode(index_id.as_bytes())
+    ));
+
+    assert!(event_snapshot.is_file());
+    assert!(journal.is_file());
+    assert!(!response_snapshot.exists());
+
+    let journal_contents = common::read_test_file(&journal);
+    assert_eq!(journal_contents.lines().count(), 1);
+    assert!(journal_contents.contains("\"status\":\"started\""));
+    assert!(!journal_contents.contains("\"status\":\"completed\""));
+
+    engine.shutdown().expect("engine shutdown should succeed");
+}
+
+#[test]
+fn e2e_completed_index_assignment_is_rejected_from_persisted_journal() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let engine = prepare_index_event_engine(common::counting_echo_handler(counter.clone()));
+    let root = engine.operation_root().to_path_buf();
+    let event = e2e_index_event(&unique_e2e_name("e2e-index-duplicate"));
+    let definition = common::test_index_definition();
+    let capacity = common::test_capacity_accounting();
+
+    engine
+        .handle_index_event(
+            &event,
+            &definition,
+            &capacity,
+            common::test_index_event_capacity_request(),
+        )
+        .expect("first IndexEvent execution should succeed");
+
+    let index_id = e2e_index_id(&event);
+    let journal = root.join(format!(
+        "index-assignment-{}.jsonl",
+        hex_encode(index_id.as_bytes())
+    ));
+    let before = common::read_test_file(&journal);
+
+    let duplicate = engine
+        .handle_index_event(
+            &event,
+            &definition,
+            &capacity,
+            common::test_index_event_capacity_request(),
+        )
+        .expect_err("completed operation must be rejected by the durable journal");
+
+    assert!(matches!(
+        duplicate,
+        IndexEventHandlingError::OperationAlreadyCompleted { .. }
+    ));
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert_eq!(common::read_test_file(&journal), before);
+
+    engine.shutdown().expect("engine shutdown should succeed");
+}
+
+#[test]
+fn e2e_completed_index_assignment_survives_a_fresh_engine_instance() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let event = e2e_index_event(&unique_e2e_name("e2e-index-restart"));
+    let definition = common::test_index_definition();
+
+    let first_engine = prepare_index_event_engine(common::counting_echo_handler(counter.clone()));
+    let root = first_engine.operation_root().to_path_buf();
+    first_engine
+        .handle_index_event(
+            &event,
+            &definition,
+            &common::test_capacity_accounting(),
+            common::test_index_event_capacity_request(),
+        )
+        .expect("first engine instance should complete the operation");
+    first_engine
+        .shutdown()
+        .expect("first engine instance should shut down cleanly");
+
+    let second_engine = prepare_index_event_engine(common::counting_echo_handler(counter.clone()));
+    assert_eq!(
+        second_engine.operation_root(),
+        root.as_path(),
+        "a fresh engine instance must use the same durable default operation root",
+    );
+    let duplicate = second_engine
+        .handle_index_event(
+            &event,
+            &definition,
+            &common::test_capacity_accounting(),
+            common::test_index_event_capacity_request(),
+        )
+        .expect_err("a fresh engine instance must honor the persisted completion record");
+
+    assert!(matches!(
+        duplicate,
+        IndexEventHandlingError::OperationAlreadyCompleted { .. }
+    ));
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    second_engine
+        .shutdown()
+        .expect("second engine instance should shut down cleanly");
 }

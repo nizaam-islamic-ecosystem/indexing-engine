@@ -336,3 +336,104 @@ fn recovery_outcomes_map_back_to_their_selected_actions() {
         assert_eq!(outcome.action(), action);
     }
 }
+
+#[test]
+fn recovery_action_names_are_stable_and_machine_readable() {
+    let expected = [
+        (RecoveryAction::Synchronize, "synchronize"),
+        (RecoveryAction::Rebuild, "rebuild"),
+        (
+            RecoveryAction::InvalidateAndRebuild,
+            "invalidate_and_rebuild",
+        ),
+        (RecoveryAction::RestoreAvailability, "restore_availability"),
+        (RecoveryAction::Throttle, "throttle"),
+        (
+            RecoveryAction::DelegateToCoreRetry,
+            "delegate_to_core_retry",
+        ),
+        (RecoveryAction::PreserveSafeState, "preserve_safe_state"),
+        (RecoveryAction::SurfaceQueryFailure, "surface_query_failure"),
+    ];
+
+    for (action, expected_name) in expected {
+        assert_eq!(action.as_str(), expected_name);
+        assert_eq!(action.to_string(), expected_name);
+    }
+}
+
+#[test]
+fn handler_error_is_normalized_to_the_action_selected_by_the_executor() {
+    struct MismatchedErrorHandler;
+
+    impl RecoveryHandler for MismatchedErrorHandler {
+        fn synchronize(&mut self, _: &RecoveryRequest) -> Result<(), RecoveryExecutionError> {
+            Err(RecoveryExecutionError::new(
+                RecoveryAction::Rebuild,
+                "synchronize failed",
+            ))
+        }
+
+        fn rebuild(&mut self, _: &RecoveryRequest) -> Result<(), RecoveryExecutionError> {
+            Ok(())
+        }
+
+        fn invalidate_and_rebuild(
+            &mut self,
+            _: &RecoveryRequest,
+        ) -> Result<(), RecoveryExecutionError> {
+            Ok(())
+        }
+
+        fn restore_availability(
+            &mut self,
+            _: &RecoveryRequest,
+        ) -> Result<(), RecoveryExecutionError> {
+            Ok(())
+        }
+
+        fn throttle(&mut self, _: &RecoveryRequest) -> Result<(), RecoveryExecutionError> {
+            Ok(())
+        }
+
+        fn delegate_to_core_retry(
+            &mut self,
+            _: &RecoveryRequest,
+        ) -> Result<(), RecoveryExecutionError> {
+            Ok(())
+        }
+
+        fn preserve_safe_state(
+            &mut self,
+            _: &RecoveryRequest,
+        ) -> Result<(), RecoveryExecutionError> {
+            Ok(())
+        }
+
+        fn surface_query_failure(
+            &mut self,
+            _: &RecoveryRequest,
+        ) -> Result<(), RecoveryExecutionError> {
+            Ok(())
+        }
+    }
+
+    let request = RecoveryRequest::new(classify(FailureClass::StaleIndex));
+    let mut handler = MismatchedErrorHandler;
+
+    let error = RecoveryExecutor::new()
+        .execute(&request, &mut handler)
+        .expect_err("the handler failure should be propagated");
+
+    assert_eq!(error.action(), RecoveryAction::Synchronize);
+    assert_eq!(error.message(), "synchronize failed");
+}
+
+#[test]
+fn recovery_request_without_active_version_keeps_lineage_absent() {
+    let request = RecoveryRequest::new(classify(FailureClass::UnavailableIndex));
+
+    assert_eq!(request.failure().class(), FailureClass::UnavailableIndex);
+    assert_eq!(request.active_version(), None);
+    assert_eq!(request.action(), RecoveryAction::RestoreAvailability);
+}

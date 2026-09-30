@@ -980,15 +980,21 @@ const INDEX_ASSIGNMENT_STATUS_COMPLETED: &str = "completed";
 impl IndexingEngine {
     /// Creates a new Indexing Engine facade in the Core `Created` state.
     ///
-    /// The default operation root is relative to the process working directory.
+    /// The default operation root is the user's home directory under
+    /// `$HOME/.nizaam/indexing`.
+    ///
     /// Applications that need a specific durable location should use
     /// [`Self::new_with_operation_root`].
     #[must_use]
     pub fn new(engine_id: EngineId, engine_instance_id: EngineInstanceId) -> Self {
+        let home_dir = std::env::var_os("HOME").map(PathBuf::from).expect(
+            "HOME environment variable must be set for the default Indexing operation root",
+        );
+
         Self::new_with_operation_root(
             engine_id,
             engine_instance_id,
-            PathBuf::from(".nizaam").join("indexing"),
+            home_dir.join(".nizaam").join("indexing"),
         )
     }
 

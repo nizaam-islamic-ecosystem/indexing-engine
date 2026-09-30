@@ -656,3 +656,31 @@ fn missing_sequence_observations_are_allowed_by_synchronization_but_rejected_by_
         ConsistencyPolicyError::Freshness(FreshnessPolicyError::MissingUpdateSequence)
     );
 }
+
+#[test]
+fn stale_allowed_accepts_exact_declared_sequence_and_time_boundaries() {
+    let selected = version("boundary-v1", Some("source-v5"), None);
+    let mode = ConsistencyMode::stale_allowed(
+        FreshnessPolicy::new(2)
+            .with_max_time_lag(Duration::from_secs(60))
+            .with_required_source_version(source_version("source-v5")),
+    );
+
+    let evaluation = mode
+        .evaluate(
+            &selected,
+            VersionLifecycle::Published,
+            Some(12),
+            Some(10),
+            selected.source_version(),
+            Some(Duration::from_secs(60)),
+        )
+        .expect("exact declared freshness boundaries should be accepted");
+
+    assert_eq!(
+        evaluation.state(),
+        ConsistencyEvaluationState::StaleAccepted
+    );
+    assert_eq!(evaluation.update_sequence_lag(), Some(2));
+    assert_eq!(evaluation.time_lag(), Some(Duration::from_secs(60)));
+}
