@@ -623,9 +623,6 @@ fn e2e_control_plane_selection_reaches_indexing_typed_ingress_without_replacing_
 
 #[test]
 fn e2e_default_constructor_binds_to_platform_home_operation_root() {
-    let engine = IndexingEngine::new(engine_id(ENGINE_ID), instance_id(ENGINE_INSTANCE_ID))
-        .expect("default IndexingEngine construction should resolve a platform home directory");
-
     let expected_home = if cfg!(windows) {
         std::env::var_os("USERPROFILE")
             .map(PathBuf::from)
@@ -645,10 +642,38 @@ fn e2e_default_constructor_binds_to_platform_home_operation_root() {
             .expect("Unix-like test environment must expose HOME")
     };
 
-    assert_eq!(
-        engine.operation_root(),
-        expected_home.join(".nizaam").join("indexing").as_path(),
-    );
+    let expected_root = expected_home.join(".nizaam").join("indexing");
+    let result = IndexingEngine::new(engine_id(ENGINE_ID), instance_id(ENGINE_INSTANCE_ID));
+
+    match result {
+        Ok(engine) => {
+            assert_eq!(engine.operation_root(), expected_root.as_path());
+        }
+        Err(error) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let nizaam_directory = expected_home.join(".nizaam");
+                let metadata = std::fs::metadata(&nizaam_directory)
+                    .expect("existing .nizaam directory should be inspectable");
+
+                assert!(
+                    metadata.permissions().mode() & 0o077 != 0,
+                    "default construction failed, but the existing .nizaam directory is owner-only: {error:?}"
+                );
+                assert!(
+                    matches!(error, nizaam_indexing::engine::runtime::EngineSetupError::OperationRootCreationFailed(_)),
+                    "unexpected default constructor error: {error:?}"
+                );
+            }
+
+            #[cfg(not(unix))]
+            {
+                panic!("default IndexingEngine construction should succeed: {error:?}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -755,8 +780,10 @@ fn e2e_index_assignment_persists_the_complete_durable_operation_record() {
     assert_eq!(journal_contents.lines().count(), 2);
     assert!(journal_contents.contains("\"status\":\"started\""));
     assert!(journal_contents.contains("\"status\":\"completed\""));
-    assert!(journal_contents.contains(&*event_snapshot.to_string_lossy()));
-    assert!(journal_contents.contains(&*response_snapshot.to_string_lossy()));
+    let expected_event_snapshot = event_snapshot.to_string_lossy().replace('\\', "\\\\");
+    let expected_response_snapshot = response_snapshot.to_string_lossy().replace('\\', "\\\\");
+    assert!(journal_contents.contains(&expected_event_snapshot));
+    assert!(journal_contents.contains(&expected_response_snapshot));
 
     for path in common::test_files_recursive(&root) {
         assert_ne!(

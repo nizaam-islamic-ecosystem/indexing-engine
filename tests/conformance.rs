@@ -144,8 +144,12 @@ fn phase2_index_version(id: &str) -> IndexVersion {
 fn indexing_engine_keeps_core_engine_and_instance_identity_roles_distinct() {
     let engine_id = engine_id("nizaam.indexing.conformance.identity");
     let instance_id = engine_instance_id("nizaam.indexing.conformance.identity.instance");
-    let engine = IndexingEngine::new(engine_id.clone(), instance_id.clone())
-        .expect("default IndexingEngine construction should resolve a platform home directory");
+    let operation_root = common::test_operation_root();
+    let engine: IndexingEngine = common::engine_with_operation_root(
+        engine_id.clone(),
+        instance_id.clone(),
+        operation_root.clone(),
+    );
 
     assert_eq!(engine.engine_id(), &engine_id);
     assert_eq!(engine.engine_instance_id(), &instance_id);
@@ -155,6 +159,8 @@ fn indexing_engine_keeps_core_engine_and_instance_identity_roles_distinct() {
     );
     assert_eq!(engine.registration().engine_id(), &engine_id);
     assert_eq!(engine.registration().engine_instance_id(), &instance_id);
+
+    remove_test_operation_root(&operation_root);
 }
 
 #[test]

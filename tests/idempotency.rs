@@ -10,8 +10,9 @@ mod common;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Barrier},
+    sync::{Arc, Mutex, mpsc},
     thread,
+    time::Duration,
 };
 
 use common::{
@@ -114,17 +115,22 @@ fn completed_operation_is_rejected_as_duplicate() {
 fn concurrent_duplicate_operation_is_rejected_or_reported_in_progress() {
     let root = common::test_operation_root();
     let counter = invocation_counter();
-    let entered = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Arc::new(Mutex::new(release_rx));
 
-    let entered_handler = entered.clone();
-    let release_handler = release.clone();
     let counter_handler = counter.clone();
 
     let handler = arc_handler(move |_context, invocation| {
         counter_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        entered_handler.wait();
-        release_handler.wait();
+        entered_tx
+            .send(())
+            .expect("test must receive the handler-entry signal");
+        release_rx
+            .lock()
+            .expect("test release receiver should not be poisoned")
+            .recv_timeout(Duration::from_secs(5))
+            .expect("test must release the handler before its timeout");
 
         Ok(CapabilityOutcome::new(invocation.payload_bytes().to_vec()))
     });
@@ -136,9 +142,27 @@ fn concurrent_duplicate_operation_is_rejected_or_reported_in_progress() {
 
     let first = thread::spawn(move || execute_event(&first_engine, &first_event));
 
-    entered.wait();
+    let entered_result = entered_rx.recv_timeout(Duration::from_secs(5));
+    let second_result = if entered_result.is_ok() {
+        Some(execute_event(&engine, &event))
+    } else {
+        None
+    };
 
-    let second = execute_event(&engine, &event)
+    let release_result = release_tx.send(());
+    let first_result = first.join();
+
+    assert!(
+        entered_result.is_ok(),
+        "first handler invocation should report entry before the timeout"
+    );
+    assert!(
+        release_result.is_ok(),
+        "first handler must always receive the release signal"
+    );
+
+    let second = second_result
+        .expect("the second submission should run after the first handler entered")
         .expect_err("the second submission must not execute the same operation");
 
     assert!(matches!(
@@ -147,10 +171,7 @@ fn concurrent_duplicate_operation_is_rejected_or_reported_in_progress() {
     ));
     assert_eq!(invocation_count(&counter), 1);
 
-    release.wait();
-
-    first
-        .join()
+    first_result
         .expect("first execution thread should not panic")
         .expect("first execution should complete successfully");
     assert_eq!(invocation_count(&counter), 1);

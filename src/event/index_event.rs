@@ -864,7 +864,10 @@ impl<'a> TransportReader<'a> {
             5 => Ok(KeyMaterial::Bytes(self.bytes_value()?)),
             6 => {
                 let count = self.count(1)?;
-                let mut values = Vec::with_capacity(count);
+                // Avoid reserving attacker-controlled capacity up front. Valid
+                // sequences larger than the initial cap still grow normally.
+                const INITIAL_SEQUENCE_CAPACITY: usize = 1024;
+                let mut values = Vec::with_capacity(count.min(INITIAL_SEQUENCE_CAPACITY));
                 for _ in 0..count {
                     values.push(self.key_material(depth + 1)?);
                 }

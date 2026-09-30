@@ -479,9 +479,18 @@ fn recovery_discovery_does_not_mutate_the_journal() {
     cleanup_root(&root);
 }
 
+struct OperationRootCleanup(PathBuf);
+
+impl Drop for OperationRootCleanup {
+    fn drop(&mut self) {
+        common::remove_test_operation_root(&self.0);
+    }
+}
+
 #[test]
 fn recovery_discovers_an_unfinished_assignment_written_by_index_event_execution() {
     let root = common::test_operation_root();
+    let _cleanup = OperationRootCleanup(root.clone());
     let engine = common::engine_with_operation_root(
         common::test_engine_id(),
         common::test_engine_instance_id(),
@@ -536,7 +545,6 @@ fn recovery_discovers_an_unfinished_assignment_written_by_index_event_execution(
     );
 
     engine.shutdown().expect("engine shutdown should succeed");
-    common::remove_test_operation_root(&root);
 }
 
 #[test]

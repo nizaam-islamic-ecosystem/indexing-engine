@@ -41,13 +41,15 @@ use nizaam_core::control_plane::registry::{
 };
 use nizaam_core::identity::MessageId;
 use nizaam_core::status::Status;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -997,6 +999,43 @@ impl Drop for OperationLock {
 const INDEX_ASSIGNMENT_STATUS_STARTED: &str = "started";
 const INDEX_ASSIGNMENT_STATUS_COMPLETED: &str = "completed";
 
+#[cfg(unix)]
+fn ensure_default_nizaam_directory(path: &Path) -> io::Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::metadata(path)?;
+            if !metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    format!("default Nizaam path is not a directory: {}", path.display()),
+                ));
+            }
+
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "default Nizaam directory is not owner-only: {}",
+                        path.display()
+                    ),
+                ));
+            }
+
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_default_nizaam_directory(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)
+}
+
 fn platform_home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -1036,10 +1075,7 @@ impl IndexingEngine {
         let home_dir = platform_home_dir().ok_or(EngineSetupError::OperationRootUnavailable)?;
         let nizaam_directory = home_dir.join(".nizaam");
 
-        // `create_dir_all` is intentionally used here instead of requiring the
-        // `.nizaam` directory to exist beforehand. It is idempotent: an existing
-        // directory is accepted, while a missing directory is created automatically.
-        std::fs::create_dir_all(&nizaam_directory)
+        ensure_default_nizaam_directory(&nizaam_directory)
             .map_err(|error| EngineSetupError::OperationRootCreationFailed(error.to_string()))?;
 
         Ok(Self::new_with_operation_root(

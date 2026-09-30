@@ -1681,6 +1681,7 @@ fn phase6_core_health_observation_does_not_mutate_indexing_lifecycle() {
 #[test]
 fn phase6_control_plane_index_event_ingress_reconstructs_and_executes_the_typed_event() {
     let engine = test_engine();
+    let operation_root = engine.operation_root().to_path_buf();
     let registry = engine_registry();
     let counter = invocation_counter();
 
@@ -1732,6 +1733,7 @@ fn phase6_control_plane_index_event_ingress_reconstructs_and_executes_the_typed_
     assert_eq!(invocation_count(&counter), 1);
 
     engine.shutdown().expect("shutdown should succeed");
+    remove_test_operation_root(&operation_root);
 }
 
 #[test]
