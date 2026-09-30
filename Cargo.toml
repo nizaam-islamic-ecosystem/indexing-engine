@@ -1,9 +1,14 @@
 [package]
 name = "nizaam-indexing"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.96"
 autobins = false
+
+description = "Indexing and retrieval engine built on top of Nizaam Core"
+license = "MIT"
+repository = "https://github.com/nizaam-islamic-ecosystem/indexing-engine"
+readme = "README.md"
 
 [dependencies]
 blake3 = "1.8.7"
