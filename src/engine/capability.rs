@@ -126,10 +126,12 @@ impl CapabilitySet {
 
     /// Dispatches the Core request wrapped by an Indexing event.
     ///
-    /// The event remains the source of the Core contract descriptor and payload;
-    /// this helper only translates those existing request fields into the Core
-    /// invocation type. It does not create a second registry, routing algorithm,
-    /// event identity, retry policy, or transport protocol.
+    /// The event remains the source of the Core contract descriptor. The payload
+    /// comes from `IndexEvent::source_payload()` so a Control Plane transport
+    /// envelope can carry Indexing metadata without leaking that transport
+    /// framing into the capability handler. Core still owns the actual
+    /// capability registry and dispatch algorithm; this helper does not create
+    /// routing, lifecycle, identity, retry, or transport machinery.
     #[must_use]
     pub(crate) fn dispatch_index_event(
         &self,
@@ -141,7 +143,7 @@ impl CapabilitySet {
         let invocation = CapabilityInvocation::new(
             descriptor.capability_id.clone(),
             descriptor.contract_id.clone(),
-            envelope.payload.bytes().to_vec(),
+            event.source_payload().to_vec(),
         );
 
         self.dispatch(context, &invocation)

@@ -365,6 +365,8 @@ fn typed_index_event_remains_core_universal_request_content() {
         "event.correlation"
     );
 
+    assert_eq!(event.entity_type().as_str(), "semantic");
+
     assert_eq!(
         event.object_reference(),
         &ObjectReference::new("nizaam.test.sender", "object:1")

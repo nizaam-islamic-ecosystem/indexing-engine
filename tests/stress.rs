@@ -9,6 +9,10 @@
 //! Phase 6 additionally stresses the Core routing boundary without treating
 //! routing as execution or introducing a second scheduler/runtime.
 
+mod common;
+
+use common::{engine, engine_id, engine_instance_id, remove_test_operation_root};
+
 use std::sync::Barrier;
 use std::thread;
 
@@ -857,15 +861,13 @@ fn phase6_concurrent_control_plane_selection_remains_stateless_and_does_not_muta
         RoutingCandidate, RoutingConstraints, RoutingPolicy,
     };
     use nizaam_core::health::{HealthReport, LivenessReport, ReadinessReport};
-    use nizaam_core::identity::EngineId;
     use nizaam_core::runtime::LifecycleState;
-    use nizaam_indexing::IndexingEngine;
 
-    let engine = IndexingEngine::new(
-        EngineId::new("nizaam.indexing.phase6.stress").expect("engine id should be valid"),
-        nizaam_core::identity::EngineInstanceId::new("nizaam.indexing.phase6.stress.instance")
-            .expect("engine instance id should be valid"),
+    let engine = engine(
+        engine_id("nizaam.indexing.phase6.stress"),
+        engine_instance_id("nizaam.indexing.phase6.stress.instance"),
     );
+    let operation_root = engine.operation_root().to_path_buf();
 
     engine.start().expect("engine should start");
     engine
@@ -953,6 +955,8 @@ fn phase6_concurrent_control_plane_selection_remains_stateless_and_does_not_muta
     assert_eq!(engine.capabilities().len(), 1);
 
     engine.shutdown().expect("engine shutdown should succeed");
+
+    remove_test_operation_root(&operation_root);
 }
 
 #[test]

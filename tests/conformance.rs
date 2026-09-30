@@ -27,9 +27,9 @@ use nizaam_indexing::identity::IndexAssignedId;
 mod common;
 
 use common::{
-    capability_definition, capability_id, capability_invocation, engine_id, engine_instance_id,
-    engine_registry, operation_context, register_engine, test_engine, universal_request,
-    universal_response,
+    capability_definition, capability_id, capability_invocation, engine, engine_id,
+    engine_instance_id, engine_registry, operation_context, register_engine,
+    remove_test_operation_root, test_engine, universal_request, universal_response,
 };
 use nizaam_core::capability::{CapabilityDispatchResult, CapabilityError};
 use nizaam_core::contracts::{
@@ -144,7 +144,12 @@ fn phase2_index_version(id: &str) -> IndexVersion {
 fn indexing_engine_keeps_core_engine_and_instance_identity_roles_distinct() {
     let engine_id = engine_id("nizaam.indexing.conformance.identity");
     let instance_id = engine_instance_id("nizaam.indexing.conformance.identity.instance");
-    let engine = IndexingEngine::new(engine_id.clone(), instance_id.clone());
+    let operation_root = common::test_operation_root();
+    let engine: IndexingEngine = common::engine_with_operation_root(
+        engine_id.clone(),
+        instance_id.clone(),
+        operation_root.clone(),
+    );
 
     assert_eq!(engine.engine_id(), &engine_id);
     assert_eq!(engine.engine_instance_id(), &instance_id);
@@ -154,6 +159,8 @@ fn indexing_engine_keeps_core_engine_and_instance_identity_roles_distinct() {
     );
     assert_eq!(engine.registration().engine_id(), &engine_id);
     assert_eq!(engine.registration().engine_instance_id(), &instance_id);
+
+    remove_test_operation_root(&operation_root);
 }
 
 #[test]
@@ -289,14 +296,16 @@ fn engine_registration_and_capability_registration_are_separate_core_boundaries(
 
 #[test]
 fn capability_state_is_not_a_global_registry_shared_by_independent_engines() {
-    let first = IndexingEngine::new(
+    let first = engine(
         engine_id("nizaam.indexing.conformance.first"),
         engine_instance_id("nizaam.indexing.conformance.first.instance"),
     );
-    let second = IndexingEngine::new(
+    let second = engine(
         engine_id("nizaam.indexing.conformance.second"),
         engine_instance_id("nizaam.indexing.conformance.second.instance"),
     );
+    let first_root = first.operation_root().to_path_buf();
+    let second_root = second.operation_root().to_path_buf();
 
     first.start().unwrap();
     first.begin_registration().unwrap();
@@ -304,6 +313,9 @@ fn capability_state_is_not_a_global_registry_shared_by_independent_engines() {
 
     assert_eq!(first.capabilities().len(), 1);
     assert!(second.capabilities().is_empty());
+
+    remove_test_operation_root(&first_root);
+    remove_test_operation_root(&second_root);
 }
 
 #[test]

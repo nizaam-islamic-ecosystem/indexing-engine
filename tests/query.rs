@@ -863,3 +863,42 @@ fn unsupported_logical_query_capability_is_not_silently_rewritten() {
         nizaam_indexing::query::QueryPlanningError::MissingProviderCapabilities { .. }
     ));
 }
+
+#[test]
+fn planner_selects_the_candidate_matching_the_request_definition_identity() {
+    let requested = candidate(
+        IndexFamily::Inverted,
+        "requested-definition",
+        "published-requested",
+        160,
+        160,
+    );
+    let other = candidate(
+        IndexFamily::Inverted,
+        "other-definition",
+        "published-other",
+        160,
+        160,
+    );
+
+    let request = QueryRequest::exact(
+        requested.definition_identity().clone(),
+        KeyMaterial::text("term"),
+    )
+    .expect("exact request should be valid");
+
+    let plan = plan_query(
+        &request,
+        vec![other, requested],
+        &capabilities(&[ProviderCapability::ExactLookup]),
+        ProviderAvailability::Available,
+    )
+    .expect("the matching definition candidate should be selected");
+
+    assert_eq!(
+        plan.target()
+            .expect("single-index query should have a target")
+            .definition_identity(),
+        request.definition_identity()
+    );
+}

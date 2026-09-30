@@ -8,6 +8,10 @@
 //! never treated as execution, and lifecycle admission remains authoritative
 //! after a destination has been selected.
 
+mod common;
+
+use common::{engine, engine_id, engine_instance_id, remove_test_operation_root};
+
 use nizaam_indexing::build::{
     BatchChunkError, BatchError, BatchExecutor, BatchOptions, BuildInput, BuildSnapshot,
     CandidateUpdater, IndexBuilder, IndexMutation, IndexPublisher, IndexRebuilder,
@@ -966,14 +970,11 @@ fn phase6_selected_destination_cannot_bypass_core_runtime_admission() {
     use nizaam_core::control_plane::{
         PolicyInput, RoutingCandidate, RoutingConstraints, RoutingPolicy,
     };
-    use nizaam_indexing::engine::runtime::IndexingEngine;
-
-    let engine = IndexingEngine::new(
-        nizaam_core::identity::EngineId::new("nizaam.indexing.phase6.fault")
-            .expect("engine id should be valid"),
-        nizaam_core::identity::EngineInstanceId::new("nizaam.indexing.phase6.fault.instance")
-            .expect("engine instance id should be valid"),
+    let engine = engine(
+        engine_id("nizaam.indexing.phase6.fault"),
+        engine_instance_id("nizaam.indexing.phase6.fault.instance"),
     );
+    let operation_root = engine.operation_root().to_path_buf();
 
     engine.start().expect("engine should start");
     engine
@@ -1029,4 +1030,6 @@ fn phase6_selected_destination_cannot_bypass_core_runtime_admission() {
     engine
         .shutdown()
         .expect("draining engine should shut down cleanly");
+
+    remove_test_operation_root(&operation_root);
 }
