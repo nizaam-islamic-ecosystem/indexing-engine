@@ -64,9 +64,10 @@ mod common;
 
 use common::{
     capability_definition, contract_id, control_plane_request_for_event, counting_echo_handler,
-    engine_id, engine_registry, invocation_count, invocation_counter, operation_context,
-    register_engine, test_capability_id, test_capacity_accounting, test_engine, test_engine_id,
-    test_index_definition, test_index_event, test_index_event_capacity_request, universal_request,
+    engine, engine_id, engine_registry, invocation_count, invocation_counter, operation_context,
+    register_engine, remove_test_operation_root, test_capability_id, test_capacity_accounting,
+    test_engine, test_engine_id, test_index_definition, test_index_event,
+    test_index_event_capacity_request, universal_request,
 };
 use nizaam_core::capability::CapabilityError;
 use nizaam_core::contracts::{
@@ -369,18 +370,18 @@ fn capability_dispatch_remains_core_backed_through_the_public_request_boundary()
 
 #[test]
 fn independent_engine_instances_keep_their_complete_integration_state_separate() {
-    let first = IndexingEngine::new(
+    let first = engine(
         engine_id("nizaam.indexing.integration.shared"),
         EngineInstanceId::new("nizaam.indexing.integration.instance.1")
             .expect("test instance id must be valid"),
-    )
-    .expect("default IndexingEngine construction should resolve a platform home directory");
-    let second = IndexingEngine::new(
+    );
+    let second = engine(
         engine_id("nizaam.indexing.integration.shared"),
         EngineInstanceId::new("nizaam.indexing.integration.instance.2")
             .expect("test instance id must be valid"),
-    )
-    .expect("default IndexingEngine construction should resolve a platform home directory");
+    );
+    let first_root = first.operation_root().to_path_buf();
+    let second_root = second.operation_root().to_path_buf();
 
     assert_eq!(first.engine_id(), second.engine_id());
     assert_ne!(first.engine_instance_id(), second.engine_instance_id());
@@ -397,6 +398,9 @@ fn independent_engine_instances_keep_their_complete_integration_state_separate()
     assert_eq!(second.capabilities().len(), 0);
     assert!(registry.contains(first.engine_instance_id()));
     assert!(!registry.contains(second.engine_instance_id()));
+
+    remove_test_operation_root(&first_root);
+    remove_test_operation_root(&second_root);
 }
 
 #[test]

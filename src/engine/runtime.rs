@@ -1332,9 +1332,8 @@ impl IndexingEngine {
             hex_encode(index_id.as_bytes())
         ));
 
-        // Re-check after acquiring the exclusive operation marker. Another
-        // concurrent request may have completed the operation between the
-        // first journal inspection and lock acquisition.
+        // Fast path: reject an already-known operation before acquiring the
+        // exclusive marker when the journal already contains the terminal state.
         match existing_operation_state(
             &journal_path,
             received_event.event_id().as_str(),
@@ -1368,6 +1367,9 @@ impl IndexingEngine {
             }
         };
 
+        // Re-check after acquiring the exclusive operation marker. Another
+        // concurrent request may have completed the operation between the
+        // fast-path journal inspection and lock acquisition.
         match existing_operation_state(
             &journal_path,
             received_event.event_id().as_str(),

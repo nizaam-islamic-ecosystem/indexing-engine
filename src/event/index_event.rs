@@ -121,6 +121,9 @@ pub enum IndexEventValidationError {
     /// The Indexing-owned requirement is not a valid logical contract.
     InvalidRequirement(IndexRequirementValidationError),
 
+    /// A component of the transported Indexing requirement is structurally invalid.
+    InvalidRequirementValue(IndexEventRequirementValueValidationError),
+
     /// The source-owned object reference is structurally invalid.
     InvalidObjectReference(ObjectReferenceValidationError),
 
@@ -139,6 +142,12 @@ impl fmt::Display for IndexEventValidationError {
             }
             Self::InvalidRequirement(error) => {
                 write!(formatter, "invalid IndexRequirement in IndexEvent: {error}")
+            }
+            Self::InvalidRequirementValue(error) => {
+                write!(
+                    formatter,
+                    "invalid IndexRequirement value in IndexEvent: {error}"
+                )
             }
             Self::InvalidObjectReference(error) => {
                 write!(formatter, "invalid ObjectReference in IndexEvent: {error}")
@@ -159,12 +168,43 @@ impl Error for IndexEventValidationError {
         match self {
             Self::InvalidEntityType(error) => Some(error),
             Self::InvalidRequirement(error) => Some(error),
+            Self::InvalidRequirementValue(error) => Some(error),
             Self::InvalidObjectReference(error) => Some(error),
             Self::InvalidKeyMaterial(error) => Some(error),
             Self::InvalidInteraction(_) => None,
         }
     }
 }
+
+/// Validation failures for individual IndexRequirement components decoded from
+/// the Control Plane application payload. The original validation error is
+/// preserved instead of being collapsed into a transport length error.
+#[derive(Debug, Eq, PartialEq)]
+pub enum IndexEventRequirementValueValidationError {
+    Namespace(crate::identity::NamespaceValidationError),
+    TargetReferenceType(crate::index::TargetReferenceTypeValidationError),
+    ConsistencyRequirement(crate::index::ConsistencyRequirementValidationError),
+    SourceVersion(crate::index::SourceVersionValidationError),
+    SchemaVersion(crate::index::SchemaVersionValidationError),
+}
+
+impl fmt::Display for IndexEventRequirementValueValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Namespace(error) => write!(formatter, "invalid namespace: {error}"),
+            Self::TargetReferenceType(error) => {
+                write!(formatter, "invalid target reference type: {error}")
+            }
+            Self::ConsistencyRequirement(error) => {
+                write!(formatter, "invalid consistency requirement: {error}")
+            }
+            Self::SourceVersion(error) => write!(formatter, "invalid source version: {error}"),
+            Self::SchemaVersion(error) => write!(formatter, "invalid schema version: {error}"),
+        }
+    }
+}
+
+impl Error for IndexEventRequirementValueValidationError {}
 
 impl From<IndexRequirementValidationError> for IndexEventValidationError {
     fn from(error: IndexRequirementValidationError) -> Self {
@@ -197,10 +237,6 @@ pub struct IndexEvent {
     requirement: IndexRequirement,
     object_reference: ObjectReference,
     key_material: KeyMaterial,
-    /// Source payload recovered from the explicit Control Plane transport
-    /// envelope. `None` means the Core request payload is already the source
-    /// payload, which is the normal local construction path.
-    source_payload_override: Option<Vec<u8>>,
 }
 
 impl IndexEvent {
@@ -222,7 +258,6 @@ impl IndexEvent {
             requirement,
             object_reference,
             key_material,
-            source_payload_override: None,
         };
 
         event.validate()?;
@@ -345,13 +380,11 @@ impl IndexEvent {
     /// provider instruction. The source remains the owner of its semantics.
     #[must_use]
     pub fn source_payload(&self) -> &[u8] {
-        self.source_payload_override
-            .as_deref()
-            .unwrap_or_else(|| self.universal_event().envelope.payload.bytes())
+        self.universal_event().envelope.payload.bytes()
     }
 
-    /// Encodes the Indexing-owned fields together with the source payload for
-    /// transport through a Core [`UniversalRequest`].
+    /// Encodes the Indexing-owned fields together with the source payload as
+    /// the application payload of a Core [`UniversalRequest`].
     ///
     /// Core remains the owner of the surrounding envelope and its identities.
     /// This method only defines the Indexing-owned payload boundary required
@@ -361,6 +394,28 @@ impl IndexEvent {
     /// OperationId, or CorrelationId.
     pub fn control_plane_payload(&self) -> Result<Vec<u8>, IndexEventTransportError> {
         encode_transport_payload(self)
+    }
+
+    /// Creates the Core [`UniversalRequest`] whose application payload contains
+    /// the Indexing-owned Control Plane payload representation.
+    ///
+    /// This method does not create a new Core identity and does not perform
+    /// wire-level transport envelope. The returned request retains the existing
+    /// envelope, `MessageId`, `EventId`, operation context, participants, and
+    /// contract metadata. Core's Control Plane/transport layer is responsible
+    /// for serializing that request on the wire.
+    pub fn into_control_plane_request(self) -> Result<UniversalRequest, IndexEventTransportError> {
+        let payload = encode_transport_payload(&self)?;
+        let mut request = self.into_universal_request();
+        let descriptor = request
+            .universal_event()
+            .envelope
+            .payload
+            .descriptor()
+            .clone();
+        request.event.envelope.payload =
+            nizaam_core::contracts::EncodedPayload::new(descriptor, payload);
+        Ok(request)
     }
 
     /// Reconstructs an [`IndexEvent`] from a Core request carrying the explicit
@@ -375,13 +430,22 @@ impl IndexEvent {
         let (entity_type, requirement, object_reference, key_material, source_payload) =
             decode_transport_payload(payload)?;
 
+        let mut request = request;
+        let descriptor = request
+            .universal_event()
+            .envelope
+            .payload
+            .descriptor()
+            .clone();
+        request.event.envelope.payload =
+            nizaam_core::contracts::EncodedPayload::new(descriptor, source_payload);
+
         let event = Self {
             request,
             entity_type,
             requirement,
             object_reference,
             key_material,
-            source_payload_override: Some(source_payload),
         };
 
         event
@@ -392,7 +456,8 @@ impl IndexEvent {
 }
 
 /// Errors produced while encoding or decoding the explicit IndexEvent
-/// Control Plane payload boundary.
+/// Control Plane application-payload boundary. Core remains responsible for
+/// serializing and transporting the enclosing `UniversalRequest`.
 #[derive(Debug, Eq, PartialEq)]
 pub enum IndexEventTransportError {
     /// The payload does not contain the Indexing transport magic/version.
@@ -440,8 +505,6 @@ impl Error for IndexEventTransportError {
 
 const TRANSPORT_MAGIC: &[u8; 4] = b"NIZE";
 const TRANSPORT_VERSION: u8 = 1;
-const MAX_TRANSPORT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TRANSPORT_ITEMS: usize = 4096;
 
 fn encode_transport_payload(event: &IndexEvent) -> Result<Vec<u8>, IndexEventTransportError> {
     event
@@ -494,10 +557,6 @@ fn decode_transport_payload(
     ),
     IndexEventTransportError,
 > {
-    if payload.len() > MAX_TRANSPORT_BYTES {
-        return Err(IndexEventTransportError::InvalidLength);
-    }
-
     let mut reader = TransportReader::new(payload);
     if reader.take(4)? != TRANSPORT_MAGIC {
         return Err(IndexEventTransportError::InvalidHeader);
@@ -510,8 +569,11 @@ fn decode_transport_payload(
         IndexEventTransportError::InvalidEvent(IndexEventValidationError::InvalidEntityType(error))
     })?;
 
-    let namespace = IndexNamespace::new(reader.string()?)
-        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+    let namespace = IndexNamespace::new(reader.string()?).map_err(|error| {
+        IndexEventTransportError::InvalidEvent(IndexEventValidationError::InvalidRequirementValue(
+            IndexEventRequirementValueValidationError::Namespace(error),
+        ))
+    })?;
 
     let family = match reader.u8()? {
         0 => IndexFamily::Identity,
@@ -521,7 +583,7 @@ fn decode_transport_payload(
         tag => return Err(IndexEventTransportError::InvalidTag(tag)),
     };
 
-    let field_count = reader.count()?;
+    let field_count = reader.count(4)?;
     let mut fields = Vec::with_capacity(field_count);
     for _ in 0..field_count {
         fields.push(reader.string()?);
@@ -532,26 +594,47 @@ fn decode_transport_payload(
         ))
     })?;
 
-    let target_reference_type = TargetReferenceType::new(reader.string()?)
-        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+    let target_reference_type = TargetReferenceType::new(reader.string()?).map_err(|error| {
+        IndexEventTransportError::InvalidEvent(IndexEventValidationError::InvalidRequirementValue(
+            IndexEventRequirementValueValidationError::TargetReferenceType(error),
+        ))
+    })?;
 
     let uniqueness = match reader.u8()? {
         0 => Uniqueness::Unique,
         1 => Uniqueness::NonUnique,
         tag => return Err(IndexEventTransportError::InvalidTag(tag)),
     };
-    let consistency_requirement = ConsistencyRequirement::new(reader.string()?)
-        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+    let consistency_requirement =
+        ConsistencyRequirement::new(reader.string()?).map_err(|error| {
+            IndexEventTransportError::InvalidEvent(
+                IndexEventValidationError::InvalidRequirementValue(
+                    IndexEventRequirementValueValidationError::ConsistencyRequirement(error),
+                ),
+            )
+        })?;
     let source_version = reader
         .optional_string()?
         .map(SourceVersion::new)
         .transpose()
-        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+        .map_err(|error| {
+            IndexEventTransportError::InvalidEvent(
+                IndexEventValidationError::InvalidRequirementValue(
+                    IndexEventRequirementValueValidationError::SourceVersion(error),
+                ),
+            )
+        })?;
     let schema_version = reader
         .optional_string()?
         .map(SchemaVersion::new)
         .transpose()
-        .map_err(|_| IndexEventTransportError::InvalidLength)?;
+        .map_err(|error| {
+            IndexEventTransportError::InvalidEvent(
+                IndexEventValidationError::InvalidRequirementValue(
+                    IndexEventRequirementValueValidationError::SchemaVersion(error),
+                ),
+            )
+        })?;
 
     let requirement = IndexRequirement::new(
         namespace,
@@ -723,9 +806,10 @@ impl<'a> TransportReader<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    fn count(&mut self) -> Result<usize, IndexEventTransportError> {
+    fn count(&mut self, minimum_bytes_per_item: usize) -> Result<usize, IndexEventTransportError> {
         let value = self.u32()? as usize;
-        if value > MAX_TRANSPORT_ITEMS {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if minimum_bytes_per_item == 0 || value > remaining / minimum_bytes_per_item {
             return Err(IndexEventTransportError::InvalidLength);
         }
         Ok(value)
@@ -746,7 +830,7 @@ impl<'a> TransportReader<'a> {
 
     fn bytes_value(&mut self) -> Result<Vec<u8>, IndexEventTransportError> {
         let length = self.u32()? as usize;
-        if length > MAX_TRANSPORT_BYTES || length > self.bytes.len().saturating_sub(self.offset) {
+        if length > self.bytes.len().saturating_sub(self.offset) {
             return Err(IndexEventTransportError::InvalidLength);
         }
         Ok(self.take(length)?.to_vec())
@@ -779,7 +863,7 @@ impl<'a> TransportReader<'a> {
             4 => Ok(KeyMaterial::Text(self.string()?)),
             5 => Ok(KeyMaterial::Bytes(self.bytes_value()?)),
             6 => {
-                let count = self.count()?;
+                let count = self.count(1)?;
                 let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
                     values.push(self.key_material(depth + 1)?);
@@ -787,16 +871,24 @@ impl<'a> TransportReader<'a> {
                 Ok(KeyMaterial::Sequence(values))
             }
             7 => {
-                let count = self.count()?;
+                let count = self.count(5)?;
                 let mut values = BTreeMap::new();
                 for _ in 0..count {
                     let name = self.string()?;
                     let value = self.key_material(depth + 1)?;
-                    if values.insert(name, value).is_some() {
-                        return Err(IndexEventTransportError::InvalidLength);
+                    if values.insert(name.clone(), value).is_some() {
+                        return Err(IndexEventTransportError::InvalidEvent(
+                            IndexEventValidationError::InvalidKeyMaterial(
+                                KeyMaterialValidationError::DuplicateMapField(name),
+                            ),
+                        ));
                     }
                 }
-                KeyMaterial::map(values).map_err(|_| IndexEventTransportError::InvalidLength)
+                KeyMaterial::map(values).map_err(|error| {
+                    IndexEventTransportError::InvalidEvent(
+                        IndexEventValidationError::InvalidKeyMaterial(error),
+                    )
+                })
             }
             tag => Err(IndexEventTransportError::InvalidTag(tag)),
         }
@@ -911,12 +1003,8 @@ mod tests {
     #[test]
     fn control_plane_transport_round_trip_preserves_core_identity_and_indexing_fields() {
         let source = EngineId::new("nizaam.source.test").expect("source id must be valid");
-        let request = request(source, None);
-        let original_event_id = request.event_id().clone();
-        let original_message_id = request.message_id().clone();
-        let original_operation = request.universal_event().envelope.operation_context.clone();
         let original = IndexEvent::new(
-            request,
+            request(source, None),
             EntityType::new("semantic").expect("entity type must be valid"),
             requirement(),
             object_reference(),
@@ -924,27 +1012,21 @@ mod tests {
         )
         .expect("event must be valid");
 
-        let transport_payload = original
-            .control_plane_payload()
-            .expect("transport encoding must succeed");
-        let envelope = &original.universal_event().envelope;
-        let transport_request = UniversalRequest::new(MessageEnvelope::new(
-            envelope.message_id.clone(),
-            envelope.operation_context.clone(),
-            envelope.metadata.clone(),
-            EncodedPayload::new(
-                envelope.metadata.descriptor.payload.clone(),
-                transport_payload,
-            ),
-        ));
-        let transport_event_id = transport_request.event_id().clone();
+        let original_event_id = original.event_id().clone();
+        let original_message_id = original.message_id().clone();
+        let original_operation = original.operation_context().clone();
+        let original_source_payload = original.source_payload().to_vec();
+
+        let transport_request = original
+            .clone()
+            .into_control_plane_request()
+            .expect("control plane request construction must succeed");
         let reconstructed = IndexEvent::from_control_plane_request(transport_request)
             .expect("transport reconstruction must succeed");
 
-        assert_eq!(reconstructed.event_id(), &transport_event_id);
+        assert_eq!(reconstructed.event_id(), &original_event_id);
         assert_eq!(reconstructed.message_id(), &original_message_id);
         assert_eq!(reconstructed.operation_context(), &original_operation);
-        assert_ne!(reconstructed.event_id(), &original_event_id);
         assert_eq!(reconstructed.entity_type(), original.entity_type());
         assert_eq!(reconstructed.requirement(), original.requirement());
         assert_eq!(
@@ -952,7 +1034,7 @@ mod tests {
             original.object_reference()
         );
         assert_eq!(reconstructed.key_material(), original.key_material());
-        assert_eq!(reconstructed.source_payload(), original.source_payload());
+        assert_eq!(reconstructed.source_payload(), original_source_payload);
     }
 
     #[test]
@@ -1002,21 +1084,158 @@ mod tests {
         )
         .expect("event must be valid");
 
-        let payload = event
-            .control_plane_payload()
-            .expect("transport encoding must succeed");
-        let envelope = &event.universal_event().envelope;
-        let request = UniversalRequest::new(MessageEnvelope::new(
-            envelope.message_id.clone(),
-            envelope.operation_context.clone(),
-            envelope.metadata.clone(),
-            EncodedPayload::new(envelope.metadata.descriptor.payload.clone(), payload),
-        ));
+        let request = event
+            .clone()
+            .into_control_plane_request()
+            .expect("control plane request construction must succeed");
         let reconstructed = IndexEvent::from_control_plane_request(request)
             .expect("transport reconstruction must succeed");
 
         assert_eq!(reconstructed.source_payload(), b"source-owned-payload");
         assert_eq!(reconstructed.entity_type().as_str(), "word");
+        assert_eq!(reconstructed.message_id(), event.message_id());
+        assert_eq!(reconstructed.event_id(), event.event_id());
+    }
+
+    #[test]
+    fn control_plane_payload_is_application_data_only() {
+        let event = IndexEvent::new(
+            request(
+                EngineId::new("nizaam.source.test").expect("source id must be valid"),
+                None,
+            ),
+            EntityType::new("word").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::text("term"),
+        )
+        .expect("event must be valid");
+
+        let payload = event
+            .control_plane_payload()
+            .expect("application payload encoding must succeed");
+
+        assert_eq!(&payload[..4], b"NIZE");
+    }
+
+    #[test]
+    fn control_plane_request_round_trip_restores_the_original_core_payload() {
+        let event = IndexEvent::new(
+            request(
+                EngineId::new("nizaam.source.test").expect("source id must be valid"),
+                None,
+            ),
+            EntityType::new("word").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::text("term"),
+        )
+        .expect("event must be valid");
+
+        let message_id = event.message_id().clone();
+        let event_id = event.event_id().clone();
+        let request = event
+            .clone()
+            .into_control_plane_request()
+            .expect("control plane request construction must succeed");
+
+        assert_eq!(request.message_id(), &message_id);
+        assert_eq!(request.event_id(), &event_id);
+        assert_ne!(
+            request.universal_event().envelope.payload.bytes(),
+            event.source_payload()
+        );
+
+        let reconstructed = IndexEvent::from_control_plane_request(request)
+            .expect("control plane request reconstruction must succeed");
+
+        assert_eq!(reconstructed.event_id(), &event_id);
+        assert_eq!(reconstructed.message_id(), &message_id);
+        assert_eq!(reconstructed.source_payload(), event.source_payload());
+        assert_eq!(reconstructed.entity_type(), event.entity_type());
+        assert_eq!(reconstructed.requirement(), event.requirement());
+        assert_eq!(reconstructed.object_reference(), event.object_reference());
+        assert_eq!(reconstructed.key_material(), event.key_material());
+    }
+
+    #[test]
+    fn transported_requirement_validation_errors_are_not_reported_as_lengths() {
+        let event = IndexEvent::new(
+            request(
+                EngineId::new("nizaam.source.test").expect("source id must be valid"),
+                None,
+            ),
+            EntityType::new("word").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::text("term"),
+        )
+        .expect("event must be valid");
+
+        let mut payload = event
+            .control_plane_payload()
+            .expect("application payload encoding must succeed");
+        // Locate the namespace bytes and corrupt the first namespace character
+        // without changing any application-payload structure. The decoder
+        // must preserve the namespace validation error as an invalid event.
+        let namespace_marker = b"logical";
+        let position = payload
+            .windows(namespace_marker.len())
+            .position(|window| window == namespace_marker)
+            .expect("encoded namespace must be present");
+        payload[position] = b' ';
+
+        let mut request = event.into_control_plane_request().expect("request");
+        let descriptor = request
+            .universal_event()
+            .envelope
+            .payload
+            .descriptor()
+            .clone();
+        request.event.envelope.payload =
+            nizaam_core::contracts::EncodedPayload::new(descriptor, payload);
+
+        assert!(matches!(
+            IndexEvent::from_control_plane_request(request),
+            Err(IndexEventTransportError::InvalidEvent(
+                IndexEventValidationError::InvalidRequirementValue(
+                    IndexEventRequirementValueValidationError::Namespace(_)
+                )
+            ))
+        ));
+    }
+
+    #[test]
+    fn control_plane_payload_does_not_impose_an_indexing_item_count_limit() {
+        let values = (0..4097).map(KeyMaterial::Unsigned).collect::<Vec<_>>();
+        let event = IndexEvent::new(
+            request(
+                EngineId::new("nizaam.source.test").expect("source id must be valid"),
+                None,
+            ),
+            EntityType::new("word").expect("entity type must be valid"),
+            requirement(),
+            object_reference(),
+            KeyMaterial::Sequence(values),
+        )
+        .expect("event must be valid");
+
+        let expected_key_material = event.key_material().canonical_bytes();
+        let payload = event
+            .control_plane_payload()
+            .expect("application payload encoding must not impose an item-count limit");
+
+        let request = event
+            .into_control_plane_request()
+            .expect("control plane request construction must succeed");
+        let reconstructed = IndexEvent::from_control_plane_request(request)
+            .expect("4097 logical key items must remain decodable");
+
+        assert!(!payload.is_empty());
+        assert_eq!(
+            reconstructed.key_material().canonical_bytes(),
+            expected_key_material
+        );
     }
 
     #[test]

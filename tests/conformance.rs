@@ -27,9 +27,9 @@ use nizaam_indexing::identity::IndexAssignedId;
 mod common;
 
 use common::{
-    capability_definition, capability_id, capability_invocation, engine_id, engine_instance_id,
-    engine_registry, operation_context, register_engine, test_engine, universal_request,
-    universal_response,
+    capability_definition, capability_id, capability_invocation, engine, engine_id,
+    engine_instance_id, engine_registry, operation_context, register_engine,
+    remove_test_operation_root, test_engine, universal_request, universal_response,
 };
 use nizaam_core::capability::{CapabilityDispatchResult, CapabilityError};
 use nizaam_core::contracts::{
@@ -290,16 +290,16 @@ fn engine_registration_and_capability_registration_are_separate_core_boundaries(
 
 #[test]
 fn capability_state_is_not_a_global_registry_shared_by_independent_engines() {
-    let first = IndexingEngine::new(
+    let first = engine(
         engine_id("nizaam.indexing.conformance.first"),
         engine_instance_id("nizaam.indexing.conformance.first.instance"),
-    )
-    .expect("default IndexingEngine construction should resolve a platform home directory");
-    let second = IndexingEngine::new(
+    );
+    let second = engine(
         engine_id("nizaam.indexing.conformance.second"),
         engine_instance_id("nizaam.indexing.conformance.second.instance"),
-    )
-    .expect("default IndexingEngine construction should resolve a platform home directory");
+    );
+    let first_root = first.operation_root().to_path_buf();
+    let second_root = second.operation_root().to_path_buf();
 
     first.start().unwrap();
     first.begin_registration().unwrap();
@@ -307,6 +307,9 @@ fn capability_state_is_not_a_global_registry_shared_by_independent_engines() {
 
     assert_eq!(first.capabilities().len(), 1);
     assert!(second.capabilities().is_empty());
+
+    remove_test_operation_root(&first_root);
+    remove_test_operation_root(&second_root);
 }
 
 #[test]
