@@ -210,9 +210,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nizaam-core"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00f87164852dc4615ae1414bc30a68c0b8e5525be5fc7cf2e1b22affd40b8d38"
+checksum = "b43c01f2d0bae2e24623ce5f22b4c0cdc77898eb54e7e93ae25f4516c92bc7b8"
 dependencies = [
  "futures",
  "serde",
